@@ -2,13 +2,14 @@
 
 import time
 import torch
+import torch.nn as nn
+from torch import __version__
 import contextlib
 
 from backend import stream, memory_management, utils
 from backend.patcher.lora import merge_lora_to_weight
 
-
-stash = {}
+stash = []
 
 
 def get_weight_and_bias(layer, weight_args=None, bias_args=None, weight_fn=None, bias_fn=None):
@@ -84,8 +85,11 @@ def weights_manual_cast(layer, x, skip_weight_dtype=False, skip_bias_dtype=False
     return weight, bias, signal
 
 
+
 @contextlib.contextmanager
 def main_stream_worker(weight, bias, signal):
+    global stash
+
     if signal is None or not stream.should_use_stream():
         yield
         return
@@ -94,16 +98,12 @@ def main_stream_worker(weight, bias, signal):
         stream.current_stream.wait_event(signal)
         yield
         finished_signal = stream.current_stream.record_event()
-        stash[id(finished_signal)] = (weight, bias, finished_signal)
+        stash.append((id(finished_signal), weight, bias, finished_signal))
+        # stash[id(finished_signal)] = (weight, bias, finished_signal)
 
-    garbage = []
-    for k, (w, b, s) in stash.items():
-        if s.query():
-            garbage.append(k)
-
-    for k in garbage:
-        del stash[k]
-    return
+    if len(stash) > 50:
+        stash[25][3].synchronize()
+    stash = [item for item in stash if not item[3].query()]
 
 
 def cleanup_cache():
@@ -120,11 +120,13 @@ current_device = None
 current_dtype = None
 current_manual_cast_enabled = False
 current_bnb_dtype = None
+current_fp8_mode = None
 
+IS_TORCH_2_4 = __version__ < (2, 4, 9)
 
 class ForgeOperations:
     class Linear(torch.nn.Module):
-        def __init__(self, in_features, out_features, *args, **kwargs):
+        def __init__(self, in_features, out_features, float_weight = None, float_bias = None, *args, **kwargs):
             super().__init__()
             self.in_features = in_features
             self.out_features = out_features
@@ -133,6 +135,54 @@ class ForgeOperations:
             self.scale_weight = None
             self.bias = None
             self.parameters_manual_cast = current_manual_cast_enabled
+            self.fp8_mode = current_fp8_mode
+
+            if current_fp8_mode:
+                self.float8_dtype = torch.float8_e4m3fn
+                self.input_float8_dtype = torch.float8_e5m2
+                self.input_scale_initialized = False
+                self.weight_initialized = False
+                self.max_value = torch.finfo(self.float8_dtype).max
+                self.input_max_value = torch.finfo(self.input_float8_dtype).max
+                # factory_kwargs = {"dtype": current_dtype, "device": current_device}
+                # if float_weight is None:
+                #     self.weight = nn.Parameter(
+                #         torch.empty((out_features, in_features), **factory_kwargs)
+                #     )
+                # else:
+                #     self.weight = nn.Parameter(
+                #         float_weight, requires_grad=float_weight.requires_grad
+                #     )
+                # if float_bias is None:
+                #     if bias:
+                #         self.bias = nn.Parameter(
+                #             torch.empty(out_features, **factory_kwargs),
+                #         )
+                #     else:
+                #         self.register_parameter("bias", None)
+                # else:
+                #     self.bias = nn.Parameter(float_bias, requires_grad=float_bias.requires_grad)
+                self.num_scale_trials = 12
+                self.register_buffer(
+                    "input_amax_trials",
+                    torch.zeros(
+                        12, requires_grad=False, device=current_device, dtype=torch.float32
+                    ),
+                )
+                self.trial_index = 0
+                self.register_buffer("scale", None)
+                self.register_buffer(
+                    "input_scale",
+                    None,
+                )
+                self.register_buffer(
+                    "float8_data",
+                    None,
+                )
+                self.scale_reciprocal = self.register_buffer("scale_reciprocal", None)
+                self.input_scale_reciprocal = self.register_buffer(
+                    "input_scale_reciprocal", None
+                )
 
         def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
             if hasattr(self, 'dummy'):
@@ -143,17 +193,100 @@ class ForgeOperations:
                 if prefix + 'bias' in state_dict:
                     self.bias = torch.nn.Parameter(state_dict[prefix + 'bias'].to(self.dummy))
                 del self.dummy
+
+                if self.fp8_mode:
+                    self.quantize_weight()
             else:
                 super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+
+        def quantize_weight(self):
+            if self.weight_initialized:
+                return
+            amax = torch.max(torch.abs(self.weight.data)).float()
+            self.scale = self.amax_to_scale(amax, self.max_value)
+            self.float8_data = self.to_fp8_saturated(
+                self.weight.data, self.scale, self.max_value
+            ).to(self.float8_dtype)
+            self.scale_reciprocal = self.scale.reciprocal()
+            self.weight.data = torch.zeros(
+                1, dtype=self.weight.dtype, device=self.weight.device, requires_grad=False
+            )
+            self.weight_initialized = True
+
+        def amax_to_scale(self, amax, max_val):
+            return (max_val / torch.clamp(amax, min=1e-12)).clamp(max=max_val)
+
+        def to_fp8_saturated(self, x, scale, max_val):
+            return (x * scale).clamp(-max_val, max_val)
+        
+        def quantize_input(self, x: torch.Tensor):
+            if self.input_scale_initialized:
+                return self.to_fp8_saturated(x, self.input_scale, self.input_max_value).to(
+                    self.input_float8_dtype
+                )
+            elif self.trial_index < self.num_scale_trials:
+
+                amax = torch.max(torch.abs(x)).float()
+
+                self.input_amax_trials[self.trial_index] = amax
+                self.trial_index += 1
+                self.input_scale = self.amax_to_scale(
+                    self.input_amax_trials[: self.trial_index].max(), self.input_max_value
+                )
+                self.input_scale_reciprocal = self.input_scale.reciprocal()
+                return self.to_fp8_saturated(x, self.input_scale, self.input_max_value).to(
+                    self.input_float8_dtype
+                )
+            else:
+                self.input_scale = self.amax_to_scale(
+                    self.input_amax_trials.max(), self.input_max_value
+                )
+                self.input_scale_reciprocal = self.input_scale.reciprocal()
+                self.input_scale_initialized = True
+                return self.to_fp8_saturated(x, self.input_scale, self.input_max_value).to(
+                    self.input_float8_dtype
+                )
+        
+        def fp8_forward(self, x: torch.Tensor) -> torch.Tensor:
+            if self.input_scale_initialized:
+                x = self.to_fp8_saturated(x, self.input_scale, self.input_max_value).to(
+                    self.input_float8_dtype
+                )
+            else:
+                x = self.quantize_input(x)
+
+            prev_dims = x.shape[:-1]
+            x = x.view(-1, self.in_features)
+
+            # float8 matmul, much faster than float16 matmul w/ float32 accumulate on ADA devices!
+            out = torch._scaled_mm(
+                x,
+                self.float8_data.T,
+                scale_a=self.input_scale_reciprocal,
+                scale_b=self.scale_reciprocal,
+                bias=self.bias,
+                out_dtype=self.weight.dtype,
+                use_fast_accum=True,
+            )
+            if IS_TORCH_2_4:
+                out = out[0]
+            out = out.view(*prev_dims, self.out_features)
+            return out
 
         def forward(self, x):
             if self.parameters_manual_cast:
                 weight, bias, signal = weights_manual_cast(self, x)
                 with main_stream_worker(weight, bias, signal):
-                    return torch.nn.functional.linear(x, weight, bias)
+                    if self.fp8_mode:
+                        return self.fp8_forward(x)
+                    else:
+                        return torch.nn.functional.linear(x, weight, bias)
             else:
                 weight, bias = get_weight_and_bias(self)
-                return torch.nn.functional.linear(x, weight, bias)
+                if self.fp8_mode:
+                    return self.fp8_forward(x)
+                else:
+                    return torch.nn.functional.linear(x, weight, bias)
 
     class Conv2d(torch.nn.Conv2d):
 
@@ -349,6 +482,53 @@ class ForgeOperations:
                 return super().forward(x)
 
 
+def weights_manual_cast_qlora(layer, x):
+    target_dtype = x.dtype
+    target_device = x.device
+
+    weight_args = dict(device=target_device, dtype=target_dtype, non_blocking=True)
+    bias_args = dict(device=target_device, non_blocking=True)
+
+    if stream.should_use_stream():
+        with stream.stream_context()(stream.mover_stream):
+            weight, bias, lora_params = get_weight_and_bias_qlora(layer, weight_args, bias_args)
+            signal = stream.mover_stream.record_event()
+    else:
+        weight, bias, lora_params = get_weight_and_bias_qlora(layer, weight_args, bias_args)
+
+    return weight, bias, lora_params, signal
+
+
+def get_weight_and_bias_qlora(layer, weight_args=None, bias_args=None):
+    patches = getattr(layer, 'forge_online_loras', None)
+    weight_patches = patches.get('weight', None)
+
+    lora_params = None
+    if layer.weight is None:
+        raise "Not implemented"
+
+    # weight = layer.weight.to(**weight_args)
+
+    p = weight_patches[0]
+    strength = p[0]
+    v = p[1][1]
+    mat1 = memory_management.cast_to_device(v[0], weight_args["device"], weight_args["dtype"])
+    mat2 = memory_management.cast_to_device(v[1], weight_args["device"], weight_args["dtype"])
+    if v[2] is not None:
+        alpha = v[2] / mat2.shape[0]
+    else:
+        alpha = 1.0
+
+    lora_params = [alpha * strength, mat1, mat2]
+
+    bias = None
+    if layer.bias is not None:
+        bias = layer.bias
+        bias = bias.to(**bias_args)
+
+    return layer.weight, bias, lora_params
+
+
 try:
     from backend.operations_bnb import ForgeLoader4Bit, ForgeParams4bit, functional_linear_4bits, functional_dequantize_4bit
 
@@ -365,9 +545,14 @@ try:
                     self.bias = utils.tensor2parameter(self.bias.to(x.dtype))
 
                 if hasattr(self, 'forge_online_loras'):
-                    weight, bias, signal = weights_manual_cast(self, x, weight_fn=functional_dequantize_4bit, bias_fn=None, skip_bias_dtype=True)
+                    weight, bias, lora_params, signal = weights_manual_cast_qlora(self, x)
                     with main_stream_worker(weight, bias, signal):
-                        return torch.nn.functional.linear(x, weight, bias)
+                        output_base = functional_linear_4bits(x, weight, bias)
+                        temp_lora_activation = x @ lora_params[2].T
+                        output_lora = temp_lora_activation @ lora_params[1].T
+                        output_base.add_(output_lora, alpha=lora_params[0])
+                        return output_base
+                        # return torch.nn.functional.linear(x, weight, bias)
 
                 if not self.parameters_manual_cast:
                     return functional_linear_4bits(x, self.weight, self.bias)
@@ -439,10 +624,10 @@ class ForgeOperationsGGUF(ForgeOperations):
 
 
 @contextlib.contextmanager
-def using_forge_operations(operations=None, device=None, dtype=None, manual_cast_enabled=False, bnb_dtype=None):
-    global current_device, current_dtype, current_manual_cast_enabled, current_bnb_dtype
+def using_forge_operations(operations=None, device=None, dtype=None, manual_cast_enabled=False, bnb_dtype=None, fp8_mode=None):
+    global current_device, current_dtype, current_manual_cast_enabled, current_bnb_dtype, current_fp8_mode
 
-    current_device, current_dtype, current_manual_cast_enabled, current_bnb_dtype = device, dtype, manual_cast_enabled, bnb_dtype
+    current_device, current_dtype, current_manual_cast_enabled, current_bnb_dtype, current_fp8_mode = device, dtype, manual_cast_enabled, bnb_dtype, fp8_mode
 
     if operations is None:
         if bnb_dtype in ['gguf']:

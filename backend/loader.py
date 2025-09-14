@@ -153,7 +153,8 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
                     model = model_loader(unet_config)
             else:
                 initial_device = memory_management.unet_inital_load_device(parameters=state_dict_parameters, dtype=storage_dtype)
-                need_manual_cast = storage_dtype != computation_dtype
+                # need_manual_cast = storage_dtype != computation_dtype
+                need_manual_cast = True
                 to_args = dict(device=initial_device, dtype=storage_dtype)
 
                 with using_forge_operations(**to_args, manual_cast_enabled=need_manual_cast):

@@ -276,6 +276,47 @@ def attention_split(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
     )
     return r1
 
+from sageattention import sageattn
+
+def attention_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False):
+    # sageattn doesn't work with sd1.5
+    # if q.shape[-1] // heads not in [64, 96, 128]:
+    #     if memory_management.xformers_enabled():
+    #         return attention_xformers(q, k, v, heads, mask=mask, attn_precision=attn_precision, skip_reshape=skip_reshape)
+    #     return attention_pytorch(q, k, v, heads, mask=mask, attn_precision=attn_precision, skip_reshape=skip_reshape)
+    if skip_reshape:
+        b, _, _, dim_head = q.shape
+        tensor_layout="HND"
+    else:
+        b, _, dim_head = q.shape
+        dim_head //= heads
+        q, k, v = map(
+            lambda t: t.view(b, -1, heads, dim_head),
+            (q, k, v),
+        )
+        tensor_layout="NHD"
+
+    if mask is not None:
+        # add a batch dimension if there isn't already one
+        if mask.ndim == 2:
+            mask = mask.unsqueeze(0)
+        # add a heads dimension if there isn't already one
+        if mask.ndim == 3:
+            mask = mask.unsqueeze(1)
+
+    out = sageattn(q, k, v, attn_mask=mask, is_causal=False, tensor_layout=tensor_layout)
+    if tensor_layout == "HND":
+        if not skip_output_reshape:
+            out = (
+                out.transpose(1, 2).reshape(b, -1, heads * dim_head)
+            )
+    else:
+        if skip_output_reshape:
+            out = out.transpose(1, 2)
+        else:
+            out = out.reshape(b, -1, heads * dim_head)
+    return out
+
 
 def attention_xformers(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False):
     if skip_reshape:
@@ -429,7 +470,8 @@ def pytorch_attention_single_head_spatial(q, k, v):
 
 if memory_management.xformers_enabled():
     print("Using xformers cross attention")
-    attention_function = attention_xformers
+    # attention_function = attention_xformers
+    attention_function = attention_sage
 elif memory_management.pytorch_attention_enabled():
     print("Using pytorch cross attention")
     attention_function = attention_pytorch

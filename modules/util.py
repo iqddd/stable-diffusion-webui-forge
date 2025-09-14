@@ -1,8 +1,30 @@
 import os
 import re
+from pathlib import Path
 
 from modules import shared
 from modules.paths_internal import script_path, cwd
+
+
+def is_valid_path(path: str) -> bool:
+    try:
+        p = Path(path).resolve()
+        return p.exists()
+    except Exception:
+        return False
+
+
+def has_folder_in_parents(path: str, folder_name: str) -> bool:
+    try:
+        p = Path(path).resolve()
+        folder_name_lower = folder_name.lower()
+
+        for parent in p.parents:
+            if parent.name.lower() == folder_name_lower:
+                return True
+        return False
+    except Exception:
+        return False
 
 
 def natural_sort_key(s, regex=re.compile('([0-9]+)')):

@@ -1,6 +1,7 @@
 import os
 import sys
 
+from backend.diffusion_engine.base import ForgeDiffusionEngine
 import gradio as gr
 
 from modules import shared_cmd_options, shared_gradio_themes, options, shared_items, sd_models_types
@@ -45,7 +46,7 @@ options_templates: dict = None
 opts: options.Options = None
 restricted_opts: set[str] = None
 
-sd_model = None
+sd_model: ForgeDiffusionEngine = None
 
 settings_components: dict = None
 """assigned from ui.py, a mapping on setting names to gradio components responsible for those settings"""

@@ -5,6 +5,7 @@ from backend.text_processing import parsing, emphasis
 from backend import memory_management
 
 from modules.shared import opts
+from transformers.models.t5 import T5TokenizerFast
 
 
 PromptChunkFix = namedtuple('PromptChunkFix', ['offset', 'embedding'])
@@ -21,7 +22,7 @@ class T5TextProcessingEngine:
         super().__init__()
 
         self.text_encoder = text_encoder.transformer
-        self.tokenizer = tokenizer
+        self.tokenizer: T5TokenizerFast = tokenizer
 
         self.emphasis = emphasis.get_current_option(opts.emphasis)()
         self.min_length = min_length
@@ -51,7 +52,13 @@ class T5TextProcessingEngine:
                 self.token_mults[ident] = mult
 
     def tokenize(self, texts):
-        tokenized = self.tokenizer(texts, truncation=False, add_special_tokens=False)["input_ids"]
+        max_length = opts.t5_max_length
+        truncate_paddings = opts.t5_truncate_paddings
+
+        if truncate_paddings:
+            tokenized = self.tokenizer(texts, truncation=False, add_special_tokens=False)["input_ids"]
+        else:
+            tokenized = self.tokenizer(texts, max_length=max_length, padding="max_length", truncation=True)["input_ids"]
         return tokenized
 
     def encode_with_transformers(self, tokens):
@@ -110,6 +117,8 @@ class T5TextProcessingEngine:
         return chunks, token_count
 
     def __call__(self, texts):
+        from backend.operations import cleanup_cache
+
         zs = []
         cache = {}
 
@@ -141,6 +150,8 @@ class T5TextProcessingEngine:
                 cache[line] = line_z_values
 
             zs.extend(line_z_values)
+
+        cleanup_cache()
 
         return torch.stack(zs)
 

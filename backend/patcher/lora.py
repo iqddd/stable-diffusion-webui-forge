@@ -1,3 +1,9 @@
+from collections import defaultdict, namedtuple
+from dataclasses import dataclass
+import gc
+from typing import Dict, List, Tuple
+from weakref import WeakKeyDictionary
+import numpy as np
 import torch
 
 import packages_3rdparty.webui_lora_collection.lora as lora_utils_webui
@@ -8,6 +14,65 @@ from backend import memory_management, utils
 
 extra_weight_calculators = {}
 lora_collection_priority = [lora_utils_webui, lora_utils_comfyui]
+
+
+class BufferPool:
+    def __init__(self):
+        self.pool = defaultdict(list)
+        self.buffer_origins = {}
+        self.min_remainder_size = 4 * 3072
+        
+    def get_buffer(self, shape, dtype, device):
+        key = (dtype, device)
+        required_numel = np.prod(shape)
+        
+        # Find best fit buffer (smallest >= required)
+        best_idx, best_size = -1, float('inf')
+        for i, buf in enumerate(self.pool[key]):
+            if buf.numel() >= required_numel and buf.numel() < best_size:
+                best_idx, best_size = i, buf.numel()
+
+        if best_idx != -1:
+            # Split selected from best buffer
+            buffer = self.pool[key].pop(best_idx)
+            selected = buffer[:required_numel]
+            remainder = buffer[required_numel:]
+            
+            # Track origin for potential recombination
+            view_form = selected.view(shape)
+            self.buffer_origins[view_form] = (buffer, remainder)
+            
+            # Handle large remainders
+            if remainder.numel() >= self.min_remainder_size:
+                self.pool[key].append(remainder)
+            
+            return view_form
+
+        # Allocate new buffer
+        new_buffer = torch.empty(shape, dtype=dtype, device=device).flatten()
+        view_form = new_buffer.view(shape)
+        self.buffer_origins[view_form] = (new_buffer, None)
+        return view_form
+    
+    def release_buffer(self, tensors:List[torch.Tensor]):
+        if not isinstance(tensors, list):
+            tensors = [tensors]
+        
+        for tensor in tensors:
+            key = (tensor.dtype, tensor.device)
+            flattened = tensor.detach().flatten()
+            
+            # Retrieve original buffer and remainder
+            parent, remainder = self.buffer_origins.pop(tensor)
+            
+            # Only recombine if remainder wasn't used by others
+            if remainder is not None and remainder.numel() < self.min_remainder_size:
+                # Reconstruct original buffer
+                full_buffer = parent
+            else:
+                full_buffer = flattened
+            
+            self.pool[key].append(full_buffer)
 
 
 def get_function(function_name: str):
@@ -82,16 +147,18 @@ def weight_decompose(dora_scale, weight, lora_diff, alpha, strength, computation
 
 
 @torch.inference_mode()
-def merge_lora_to_weight(patches, weight, key="online_lora", computation_dtype=torch.float32):
+def merge_lora_to_weight(patches, weight: torch.Tensor, key="online_lora", computation_dtype=torch.float32, buffer_pool:BufferPool=None):
     # Modified from https://github.com/comfyanonymous/ComfyUI/blob/39f114c44bb99d4a221e8da451d4f2a20119c674/comfy/model_patcher.py#L446
 
-    weight_dtype_backup = None
+    # computation_device = torch.device('cuda', 0)
+    # weight_dtype_backup = weight.dtype if weight.dtype != computation_dtype else None
+    # weight_device_backup = weight.device if weight.device != computation_device else None
 
-    if computation_dtype == weight.dtype:
-        weight = weight.clone()
+    weight_ = weight
+    if buffer_pool:
+        weight = buffer_pool.get_buffer(weight.shape, computation_dtype, weight.device).copy_(weight)
     else:
-        weight_dtype_backup = weight.dtype
-        weight = weight.to(dtype=computation_dtype)
+        weight = weight.to(dtype=computation_dtype) if computation_dtype != weight.dtype else weight.clone()
 
     for p in patches:
         strength = p[0]
@@ -99,8 +166,7 @@ def merge_lora_to_weight(patches, weight, key="online_lora", computation_dtype=t
         strength_model = p[2]
         offset = p[3]
         function = p[4]
-        if function is None:
-            function = lambda a: a
+        function_ = lambda a: a if function is None else function 
 
         old_weight = None
         if offset is not None:
@@ -143,8 +209,14 @@ def merge_lora_to_weight(patches, weight, key="online_lora", computation_dtype=t
             weight.copy_(v[0])
 
         elif patch_type == "lora":
-            mat1 = memory_management.cast_to_device(v[0], weight.device, computation_dtype)
-            mat2 = memory_management.cast_to_device(v[1], weight.device, computation_dtype)
+            if buffer_pool:
+                mat1 = buffer_pool.get_buffer(v[0].shape, computation_dtype, weight.device)
+                mat1.copy_(v[0])
+                mat2 = buffer_pool.get_buffer(v[1].shape, computation_dtype, weight.device)
+                mat2.copy_(v[1])
+            else:
+                mat1 = memory_management.cast_to_device(v[0], weight.device, computation_dtype)
+                mat2 = memory_management.cast_to_device(v[1], weight.device, computation_dtype)
             dora_scale = v[4]
 
             if v[2] is not None:
@@ -158,23 +230,28 @@ def merge_lora_to_weight(patches, weight, key="online_lora", computation_dtype=t
                 mat2 = torch.mm(mat2.transpose(0, 1).flatten(start_dim=1), mat3.transpose(0, 1).flatten(start_dim=1)).reshape(final_shape).transpose(0, 1)
             
             try:
-                lora_diff = torch.mm(mat1.flatten(start_dim=1), mat2.flatten(start_dim=1))
-                
-                try:
-                    lora_diff = lora_diff.reshape(weight.shape)
-                except:
-                    if weight.shape[1] < lora_diff.shape[1]:
-                        expand_factor = (lora_diff.shape[1] - weight.shape[1])
-                        weight = torch.nn.functional.pad(weight, (0, expand_factor), mode='constant', value=0)                        
-                    elif weight.shape[1] > lora_diff.shape[1]:
-                        # expand factor should be 1*64 (for FluxTools Canny or Depth), or 5*64 (for FluxTools Fill)
-                        expand_factor = (weight.shape[1] - lora_diff.shape[1])
-                        lora_diff = torch.nn.functional.pad(lora_diff, (0, expand_factor), mode='constant', value=0)
-                    
-                if dora_scale is not None:
-                    weight = weight_decompose(dora_scale, weight, lora_diff, alpha, strength, computation_dtype, function)
+                if buffer_pool and dora_scale is None and function is None:
+                    lora_diff = buffer_pool.get_buffer(weight.shape, computation_dtype, weight.device)
+                    torch.mm(mat1.flatten(start_dim=1), mat2.flatten(start_dim=1), out=lora_diff.view(-1, mat2.shape[-1]))
+                    weight.add_(lora_diff, alpha=strength * alpha)
+                    buffer_pool.release_buffer([lora_diff, mat1, mat2])
                 else:
-                    weight += function(((strength * alpha) * lora_diff).type(weight.dtype))
+                    lora_diff = torch.mm(mat1.flatten(start_dim=1), mat2.flatten(start_dim=1))  
+                    try:
+                        lora_diff = lora_diff.reshape(weight.shape)
+                    except:
+                        if weight.shape[1] < lora_diff.shape[1]:
+                            expand_factor = (lora_diff.shape[1] - weight.shape[1])
+                            weight = torch.nn.functional.pad(weight, (0, expand_factor), mode='constant', value=0)                        
+                        elif weight.shape[1] > lora_diff.shape[1]:
+                            # expand factor should be 1*64 (for FluxTools Canny or Depth), or 5*64 (for FluxTools Fill)
+                            expand_factor = (weight.shape[1] - lora_diff.shape[1])
+                            lora_diff = torch.nn.functional.pad(lora_diff, (0, expand_factor), mode='constant', value=0)
+                    
+                    if dora_scale is not None:
+                        weight = weight_decompose(dora_scale, weight, lora_diff, alpha, strength, computation_dtype, function_)
+                    else:
+                        weight += function_(((strength * alpha) * lora_diff).type(weight.dtype))
 
             except Exception as e:
                 print("ERROR {} {} {}".format(patch_type, key, e))
@@ -220,9 +297,9 @@ def merge_lora_to_weight(patches, weight, key="online_lora", computation_dtype=t
             try:
                 lora_diff = torch.kron(w1, w2).reshape(weight.shape)
                 if dora_scale is not None:
-                    weight = weight_decompose(dora_scale, weight, lora_diff, alpha, strength, computation_dtype, function)
+                    weight = weight_decompose(dora_scale, weight, lora_diff, alpha, strength, computation_dtype, function_)
                 else:
-                    weight += function(((strength * alpha) * lora_diff).type(weight.dtype))
+                    weight += function_(((strength * alpha) * lora_diff).type(weight.dtype))
             except Exception as e:
                 print("ERROR {} {} {}".format(patch_type, key, e))
                 raise e
@@ -258,9 +335,9 @@ def merge_lora_to_weight(patches, weight, key="online_lora", computation_dtype=t
             try:
                 lora_diff = (m1 * m2).reshape(weight.shape)
                 if dora_scale is not None:
-                    weight = weight_decompose(dora_scale, weight, lora_diff, alpha, strength, computation_dtype, function)
+                    weight = weight_decompose(dora_scale, weight, lora_diff, alpha, strength, computation_dtype, function_)
                 else:
-                    weight += function(((strength * alpha) * lora_diff).type(weight.dtype))
+                    weight += function_(((strength * alpha) * lora_diff).type(weight.dtype))
             except Exception as e:
                 print("ERROR {} {} {}".format(patch_type, key, e))
                 raise e
@@ -302,9 +379,9 @@ def merge_lora_to_weight(patches, weight, key="online_lora", computation_dtype=t
                     lora_diff += torch.mm(b1, b2).reshape(weight.shape)
 
                 if dora_scale is not None:
-                    weight = weight_decompose(dora_scale, weight, lora_diff, alpha, strength, computation_dtype, function)
+                    weight = weight_decompose(dora_scale, weight, lora_diff, alpha, strength, computation_dtype, function_)
                 else:
-                    weight += function(((strength * alpha) * lora_diff).type(weight.dtype))
+                    weight += function_(((strength * alpha) * lora_diff).type(weight.dtype))
             except Exception as e:
                 print("ERROR {} {} {}".format(patch_type, key, e))
                 raise e
@@ -316,10 +393,12 @@ def merge_lora_to_weight(patches, weight, key="online_lora", computation_dtype=t
         if old_weight is not None:
             weight = old_weight
 
-    if weight_dtype_backup is not None:
-        weight = weight.to(dtype=weight_dtype_backup)
-
-    return weight
+    # result = weight.to(dtype=weight_dtype_backup) if weight_dtype_backup else weight
+    # result = result.to(device=weight_device_backup) if weight_device_backup else result
+    weight_.copy_(weight)
+    if buffer_pool:
+        buffer_pool.release_buffer(weight)
+    return weight_
 
 
 def get_parameter_devices(model):
@@ -340,11 +419,15 @@ def set_parameter_devices(model, parameter_devices):
 
 from backend import operations
 
+@dataclass
+class BackupItem:
+    State: str
+    Item: torch.Tensor | torch.nn.Parameter
 
 class LoraLoader:
     def __init__(self, model):
         self.model = model
-        self.backup = {}
+        self.backup: Dict[str, BackupItem] = {}
         self.online_backup = []
         self.loaded_hash = str([])
 
@@ -376,18 +459,26 @@ class LoraLoader:
 
         self.online_backup = []
 
-        for k, w in self.backup.items():
+        for k, bi in self.backup.items():
+            if bi.State == "INACTIVE":
+                continue
+            w = bi.Item
+            bi.State = "INACTIVE"
             if not isinstance(w, torch.nn.Parameter):
                 # In very few cases
                 w = torch.nn.Parameter(w, requires_grad=False)
 
-            utils.set_attr_raw(self.model, k, w)
+            p = utils.get_attr(self.model, k)
+            p.copy_(w)
 
-        self.backup = {}
+            # utils.set_attr_raw(self.model, k, w)
 
         set_parameter_devices(self.model, parameter_devices=parameter_devices)
 
         # Patch
+
+        prev_reserved_mbytes = torch.cuda.memory_stats('cuda:0')['reserved_bytes.all.current']/1024/1024
+        buffer_pool = BufferPool()
 
         for (key, online_mode), current_patches in all_patches.items():
             try:
@@ -405,7 +496,10 @@ class LoraLoader:
                 continue
 
             if key not in self.backup:
-                self.backup[key] = weight.to(device=offload_device)
+                self.backup[key] = BackupItem("NEW", weight.to(device=offload_device, copy=True))
+            else:
+                self.backup[key].Item.copy_(weight)
+                self.backup[key].State = "ACTIVE"
 
             bnb_layer = None
 
@@ -423,8 +517,8 @@ class LoraLoader:
                 weight = dequantize_tensor(weight)
 
             try:
-                weight = merge_lora_to_weight(current_patches, weight, key, computation_dtype=torch.float32)
-            except:
+                weight = merge_lora_to_weight(current_patches, weight, key, computation_dtype=torch.float32, buffer_pool=buffer_pool)
+            except Exception as ex:
                 print('Patching LoRA weights out of memory. Retrying by offloading models.')
                 set_parameter_devices(self.model, parameter_devices={k: offload_device for k in parameter_devices.keys()})
                 memory_management.soft_empty_cache()
@@ -440,8 +534,24 @@ class LoraLoader:
 
             utils.set_attr_raw(self.model, key, torch.nn.Parameter(weight, requires_grad=False))
 
+            print(f"{key} {weight.shape} patched")
+            current_reserved_mbytes = torch.cuda.memory_stats('cuda:0')['reserved_bytes.all.current']/1024/1024
+            if current_reserved_mbytes != prev_reserved_mbytes:
+                print(f"New reserved (MB): {current_reserved_mbytes}")
+                prev_reserved_mbytes = current_reserved_mbytes
+
+            if current_reserved_mbytes > 23700:
+                gc.collect()
+                torch.cuda.synchronize('cuda:0')
+                memory_management.soft_empty_cache(force=True)
+                gc.collect()
+
         # End
 
         set_parameter_devices(self.model, parameter_devices=parameter_devices)
         self.loaded_hash = hashes
+
+        del buffer_pool
+        torch.cuda.empty_cache()
+
         return

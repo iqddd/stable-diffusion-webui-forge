@@ -15,12 +15,14 @@ import cv2
 from skimage import exposure
 from typing import Any
 
+from backend.diffusion_engine.sdxl import StableDiffusionXL
 import modules.sd_hijack
 from modules import devices, prompt_parser, masking, sd_samplers, lowvram, infotext_utils, extra_networks, sd_vae_approx, scripts, sd_samplers_common, sd_unet, errors, rng, profiling
 from modules.rng import slerp, get_noise_source_type  # noqa: F401
 from modules.sd_samplers_common import images_tensor_to_samples, decode_first_stage, approximation_indexes
 from modules.shared import opts, cmd_opts, state
 from modules.sysinfo import set_config
+from modules.util import is_valid_path, has_folder_in_parents
 import modules.shared as shared
 import modules.paths as paths
 import modules.face_restoration
@@ -172,6 +174,8 @@ class StableDiffusionProcessing:
     script_args_value: list = field(default=None, init=False)
     scripts_setup_complete: bool = field(default=False, init=False)
 
+    old_t5_truncate_paddings: bool = None
+    old_t5_max_length: int = None
     cached_uc = [None, None, None]
     cached_c = [None, None, None]
 
@@ -388,6 +392,8 @@ class StableDiffusionProcessing:
         if not opts.persistent_cond_cache:
             StableDiffusionProcessing.cached_c = [None, None]
             StableDiffusionProcessing.cached_uc = [None, None]
+            
+            
 
     def get_token_merging_ratio(self, for_hr=False):
         if for_hr:
@@ -469,7 +475,17 @@ class StableDiffusionProcessing:
         cache = caches[0]
 
         with devices.autocast():
-            shared.sd_model.set_clip_skip(int(opts.CLIP_stop_at_last_layers))
+            clip_skip = int(opts.CLIP_stop_at_last_layers)
+
+            if isinstance(shared.sd_model, StableDiffusionXL):
+                if (    hasattr(shared.sd_model, 'filename') and
+                        is_valid_path(shared.sd_model.filename) and
+                        has_folder_in_parents(shared.sd_model.filename, 'pony')):
+                    clip_skip = 2
+                else:
+                    clip_skip = 1
+
+            shared.sd_model.set_clip_skip(clip_skip)
 
             cache[1] = function(shared.sd_model, required_prompts, steps, hires_steps, shared.opts.use_old_scheduling)
 
@@ -495,6 +511,11 @@ class StableDiffusionProcessing:
         total_steps = sampler_config.total_steps(self.steps) if sampler_config else self.steps
         self.step_multiplier = total_steps // self.steps
         self.firstpass_steps = total_steps
+
+        if StableDiffusionProcessing.old_t5_truncate_paddings != shared.opts.t5_truncate_paddings or StableDiffusionProcessing.old_t5_max_length != shared.opts.t5_max_length:
+            StableDiffusionProcessing.old_t5_truncate_paddings = shared.opts.t5_truncate_paddings
+            StableDiffusionProcessing.old_t5_max_length = shared.opts.t5_max_length
+            self.clear_prompt_cache()
 
         if self.cfg_scale == 1:
             self.uc = None

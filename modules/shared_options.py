@@ -433,4 +433,20 @@ options_templates.update(options_section((None, "Hidden options"), {
     "sd_checkpoint_hash": OptionInfo("", "SHA256 hash of the current checkpoint"),
 }))
 
+# Changed part
+
+options_templates.update(options_section(('t5', "T5 options"), {
+    "t5_max_length": OptionInfo(
+        128,
+        "Max T5 length",
+        gr.Slider,  # <-- вместо gr.Number
+        {"minimum": 1, "maximum": 512, "step": 1},  # step нужен для целых
+    ),
+    "t5_truncate_paddings": OptionInfo(
+        False,
+        "Truncate paddings",
+        gr.Checkbox,
+    ),
+}))
+
 forge_shared_options.register(options_templates, options_section, OptionInfo)

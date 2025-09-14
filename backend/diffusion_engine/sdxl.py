@@ -49,8 +49,8 @@ class StableDiffusionXL(ForgeDiffusionEngine):
             embedding_expected_shape=2048,
             emphasis_name=dynamic_args['emphasis_name'],
             text_projection=False,
-            minimal_clip_skip=2,
-            clip_skip=2,
+            minimal_clip_skip=1,
+            clip_skip=1,
             return_pooled=False,
             final_layer_norm=False,
         )
@@ -63,8 +63,8 @@ class StableDiffusionXL(ForgeDiffusionEngine):
             embedding_expected_shape=2048,
             emphasis_name=dynamic_args['emphasis_name'],
             text_projection=True,
-            minimal_clip_skip=2,
-            clip_skip=2,
+            minimal_clip_skip=1,
+            clip_skip=1,
             return_pooled=True,
             final_layer_norm=False,
         )

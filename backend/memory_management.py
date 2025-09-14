@@ -356,7 +356,7 @@ def bake_gguf_model(model):
 def module_size(module, exclude_device=None, include_device=None, return_split=False):
     module_mem = 0
     weight_mem = 0
-    weight_patterns = ['weight']
+    weight_patterns = ['weight', 'float8_data']
 
     for k, p in module.named_parameters():
         t = p.data
@@ -379,6 +379,23 @@ def module_size(module, exclude_device=None, include_device=None, return_split=F
                 # quanted
                 element_size = 1.1  # a bit more than 0.5 because of quant state parameters
 
+        module_mem += t.nelement() * element_size
+
+        if k in weight_patterns:
+            weight_mem += t.nelement() * element_size
+
+    for k, p in module.named_buffers():
+        t = p.data
+
+        if exclude_device is not None:
+            if t.device == exclude_device:
+                continue
+
+        if include_device is not None:
+            if t.device != include_device:
+                continue
+
+        element_size = t.element_size()
         module_mem += t.nelement() * element_size
 
         if k in weight_patterns:
@@ -563,7 +580,9 @@ def free_memory(memory_required, device, keep_loaded=[], free_all=False):
     # this check fully unloads any 'abandoned' models
     for i in range(len(current_loaded_models) - 1, -1, -1):
         if sys.getrefcount(current_loaded_models[i].model) <= 2:
+            soft_empty_cache(force=True)
             current_loaded_models.pop(i).model_unload(avoid_model_moving=True)
+            soft_empty_cache(force=True)
 
     if free_all:
         memory_required = 1e30
@@ -611,7 +630,7 @@ def compute_model_gpu_memory_when_using_cpu_swap(current_free_mem, inference_mem
     return int(max(0, suggestion))
 
 
-def load_models_gpu(models, memory_required=0, hard_memory_preservation=0):
+def load_models_gpu(models, memory_required=0, hard_memory_preservation=1200*1024*1024):
     global vram_state
 
     execution_start_time = time.perf_counter()

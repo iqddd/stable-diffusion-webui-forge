@@ -5,6 +5,8 @@ from torch import nn
 
 from . import sampling, utils
 
+from backend.modules.k_prediction import PredictionFlux
+
 
 class VDenoiser(nn.Module):
     """A v-diffusion-pytorch model wrapper for k-diffusion."""
@@ -62,9 +64,14 @@ class ForgeScheduleLinker(nn.Module):
     def get_sigmas(self, n=None):
         if n is None:
             return sampling.append_zero(self.sigmas.flip(0))
-        t_max = len(self.sigmas) - 1
-        t = torch.linspace(t_max, 0, n, device=self.sigmas.device)
-        return sampling.append_zero(self.t_to_sigma(t))
+        if isinstance(self.predictor, PredictionFlux):
+            sigmas = self.sigmas[torch.linspace(len(self.sigmas) - 1, 0, steps=n+1).long()]
+            return sigmas
+        else:
+            t_max = len(self.sigmas) - 1
+            t = torch.linspace(t_max, 0, n, device=self.sigmas.device)
+            sigmas = sampling.append_zero(self.t_to_sigma(t))
+        return sigmas
 
     def sigma_to_t(self, sigma, quantize=None):
         return self.predictor.timestep(sigma)
