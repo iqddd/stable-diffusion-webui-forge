@@ -119,6 +119,8 @@ class BrownianTreeNoiseSampler:
 @torch.no_grad()
 def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1.):
     """Implements Algorithm 2 (Euler steps) from Karras et al. (2022)."""
+    if isinstance(model.inner_model.predictor, PredictionFlux):
+        return sample_euler_RF(model, x, sigmas, extra_args, callback, disable, s_churn, s_tmin, s_tmax, s_noise)
     extra_args = {} if extra_args is None else extra_args
     s_in = x.new_ones([x.shape[0]])
     for i in trange(len(sigmas) - 1, disable=disable):
@@ -134,6 +136,123 @@ def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None,
         dt = sigmas[i + 1] - sigma_hat
         # Euler method
         x = x + d * dt
+    return x
+
+
+@torch.no_grad()
+def sample_euler_RF(
+    model,
+    x,
+    sigmas,                    # t-последовательность, убывающая от ~1 к 0
+    extra_args=None,
+    callback=None,
+    disable=None,
+    s_churn=0.,                # интенсивность churn (как у Karras)
+    s_tmin=0.,                 # минимальное t, где разрешён churn
+    s_tmax=float('inf'),       # максимальное t, где разрешён churn
+    s_noise=1.,                # масштаб шума в churn
+    noise_sampler=None,
+):
+    """
+    Euler-сэмплер для Rectified Flow / Flow Matching:
+      траектория: x_t = (1 - t) * x0 + t * eps, t ∈ [0, 1]
+
+    - При s_churn = 0 → чистый детерминированный ODE-сэмплер (аналог Euler без ancestral).
+    - При s_churn > 0 → добавляется sigma-churn в стиле Karras.sample_euler,
+      но в параметризации RF (через t, alpha_t = 1 - t и дисперсию t^2).
+    """
+    extra_args = {} if extra_args is None else extra_args
+    noise_sampler = default_noise_sampler(x) if noise_sampler is None else noise_sampler
+
+    s_in = x.new_ones([x.shape[0]])
+    n_steps = len(sigmas) - 1
+
+    for i in trange(n_steps, disable=disable):
+        t_i = sigmas[i]
+        t_next = sigmas[i + 1]
+
+        # ---------- RF-churn (аналог sigma-churn у Karras) ----------
+        # gamma задаёт относительное увеличение t: t_hat = t_i * (1 + gamma)
+        if s_churn > 0 and (s_tmin <= t_i <= s_tmax):
+            gamma = min(s_churn / n_steps, 2**0.5 - 1)
+        else:
+            gamma = 0.0
+
+        t_hat = t_i
+        if gamma > 0:
+            # поднимаем t до t_hat (не выходим за [0, 1])
+            t_hat = t_i * (1.0 + gamma)
+            t_hat = t_hat.clamp(max=1.0) if torch.is_tensor(t_hat) else min(t_hat, 1.0)
+
+            # шаг "вперёд по времени" t_i → t_hat в параметризации:
+            #   x_t = (1 - t) x0 + t eps
+            #
+            # хотим преобразовать x_i → x_hat так, чтобы:
+            #   x_hat = (1 - t_hat) x0 + t_hat eps_new
+            #
+            # При этом x_i = (1 - t_i) x0 + t_i eps_old.
+            # Можно показать, что корректное (по распределению) преобразование:
+            #
+            #   A = alpha_hat / alpha_i
+            #   B^2 = t_hat^2 - t_i^2 * (alpha_hat^2 / alpha_i^2),
+            #
+            #   x_hat = A * x_i + B * eps,   eps ~ N(0, I).
+            #
+            eps = noise_sampler(t_i, t_hat) * s_noise
+
+            alpha_i = 1.0 - t_i
+            alpha_hat = 1.0 - t_hat
+
+            # renoise_coeff = B
+            renoise_coeff_sq = (
+                t_hat**2
+                - (t_i**2) * (alpha_hat**2) / (alpha_i**2)
+            )
+            # численно страхуемся от отрицательных из-за округления
+            renoise_coeff = renoise_coeff_sq.clamp_min(0.0).sqrt()
+
+            A = alpha_hat / alpha_i
+            x = A * x + renoise_coeff * eps
+        # ---------- конец churn-блока ----------
+
+        # Теперь x соответствует времени t_hat
+
+        # Прогон модели на t_hat: модель даёт оценку x0
+        denoised = model(x, t_hat * s_in, **extra_args)
+
+        if callback is not None:
+            callback({
+                'x': x,
+                'i': i,
+                'sigma': t_i,
+                'sigma_hat': t_hat,
+                'denoised': denoised,
+            })
+
+        # ---------- Эйлеровский шаг по RF-ODE ----------
+        # Для траектории x_t = (1 - t) x0 + t eps можно вывести:
+        #
+        #   dx/dt = (x_t - x0) / t
+        #
+        # (это точное ODE, чьё решение и даёт такую прямую интерполяцию).
+        #
+        # Поэтому детерминированный шаг:
+        #   d = (x - x0) / t_hat
+        #   dt = t_next - t_hat
+        #   x_new = x + d * dt
+        #
+        # причём для идеальной модели этот шаг даёт ровно аналитическое решение.
+        if t_hat == 0:
+            # формально деление на ноль; на практике при корректной сетке t_hat > 0,
+            # а последний шаг заканчивается в t_next = 0. Если всё же
+            # t_hat == 0 (например, кто-то передал sigmas=[...0,0]),
+            # просто берём модельное denoised.
+            x = denoised
+        else:
+            d = (x - denoised) / t_hat
+            dt = t_next - t_hat
+            x = x + d * dt
+
     return x
 
 
@@ -976,3 +1095,252 @@ def sample_deis(model, x, sigmas, extra_args=None, callback=None, disable=None, 
             buffer_model.append(d_cur.detach())
 
     return x_next
+
+
+@torch.no_grad()
+def sample_euler_negative_RF(
+    model,
+    x,
+    sigmas,                         # t-сетка (например, от 1 к 0, как в RF)
+    extra_args=None,
+    callback=None,
+    disable=None,
+    s_churn=0.,
+    s_tmin=0.,
+    s_tmax=float('inf'),
+    s_noise=1.,
+    noise_sampler=None,
+):
+    """
+    'Negative' Euler-сэмплер для linear Rectified Flow:
+
+      x_t = (1 - t) * x0 + t * eps,  t ∈ [0, 1]
+
+    Отличия от обычного RF-Euler:
+      - агрессивный churn: gamma = max(..., sqrt(2)-1)
+      - в churn-блоке шум с отрицательным знаком (A * x - B * eps)
+      - на ранних шагах (i // 2 == 1) используется x = -x - d * dt
+
+    Предполагается, что модель model(x, t) возвращает оценку x0.
+    """
+    extra_args = {} if extra_args is None else extra_args
+    noise_sampler = default_noise_sampler(x) if noise_sampler is None else noise_sampler
+
+    s_in = x.new_ones([x.shape[0]])
+    n_steps = len(sigmas) - 1
+
+    for i in trange(n_steps, disable=disable):
+        t_i = sigmas[i]
+        t_next = sigmas[i + 1]
+
+        # ---------- RF-churn (аналог sigma-churn, но для x_t = (1 - t)x0 + t eps) ----------
+        if s_tmin <= t_i <= s_tmax:
+            # как в sample_euler_negative: gamma = max(..., sqrt(2)-1)
+            gamma = max(s_churn / n_steps, 2**0.5 - 1)
+        else:
+            gamma = 0.0
+
+        t_hat = t_i
+        if gamma > 0.0:
+            # поднимаем t до t_hat = t_i * (1 + gamma)
+            t_hat = t_i * (1.0 + gamma)
+            if torch.is_tensor(t_hat):
+                t_hat = t_hat.clamp(max=1.0)
+            else:
+                t_hat = min(t_hat, 1.0)
+
+            # хотим перейти x_i -> x_hat так, чтобы
+            #   x_i   = (1 - t_i)   x0 + t_i   eps_old
+            #   x_hat = (1 - t_hat) x0 + t_hat eps_new
+            #
+            # Решение:
+            #   alpha_i   = 1 - t_i
+            #   alpha_hat = 1 - t_hat
+            #   A = alpha_hat / alpha_i
+            #   B^2 = t_hat^2 - t_i^2 * (alpha_hat^2 / alpha_i^2)
+            #
+            #   x_hat = A * x_i ± B * N(0, I)
+            eps = noise_sampler(t_i, t_hat) * s_noise
+
+            alpha_i = 1.0 - t_i
+            alpha_hat = 1.0 - t_hat
+
+            B2 = t_hat**2 - (t_i**2) * (alpha_hat**2) / (alpha_i**2)
+            B = B2.clamp_min(0.0).sqrt()
+            A = alpha_hat / alpha_i
+
+            # "negative" churn: минус перед шумом (по распределению эквивалентно, но повторяет стиль sample_euler_negative)
+            x = A * x - B * eps
+        # ---------- конец churn-блока ----------
+
+        # теперь x соответствует времени t_hat
+        denoised = model(x, t_hat * s_in, **extra_args)  # модель даёт x0
+
+        if callback is not None:
+            callback({
+                'x': x,
+                'i': i,
+                'sigma': t_i,
+                'sigma_hat': t_hat,
+                'denoised': denoised,
+            })
+
+        # ---------- Эйлеровский шаг по RF-ODE ----------
+        # Для x_t = (1 - t)x0 + t eps:
+        #   dx/dt = (x_t - x0) / t
+        if t_hat == 0.0:
+            x = denoised
+        else:
+            d = (x - denoised) / t_hat
+            dt = t_next - t_hat
+
+            # "negative" Euler на ранних шагах, как в sample_euler_negative
+            if t_next > 0 and i // 2 == 1:
+                x = -x - d * dt
+            else:
+                x = x + d * dt
+
+    return x
+
+
+@torch.no_grad()
+def sample_heunpp2_RF(
+    model,
+    x,
+    sigmas,                     # t-последовательность (аналог sigmas), убывающая от ~1 к 0
+    extra_args=None,
+    callback=None,
+    disable=None,
+    s_churn=0.,             # интенсивность churn
+    s_tmin=0.,              # минимальное t, где включаем churn
+    s_tmax=float('inf'),    # максимальное t, где включаем churn
+    s_noise=1.,             # масштаб шума в churn
+):
+    """
+    Heun++-сэмплер для Rectified Flow / Flow Matching.
+
+    Предполагаем RF-траекторию:
+        x_t = (1 - t) * x0 + t * eps,  t ∈ [0, 1]
+
+    Тогда ODE:
+        dx/dt = (x - x0) / t
+
+    Эта функция:
+      - делает RF-совместимый churn (подъём t → t_hat, с пересборкой шума),
+      - затем интегрирует ODE методом Heun / Heun++ (2 или 3 оценки производной на шаг).
+    """
+    ts = sigmas
+    extra_args = {} if extra_args is None else extra_args
+    s_in = x.new_ones([x.shape[0]])
+
+    t_end = ts[-1]
+    n_steps = len(ts) - 1
+
+    for i in trange(n_steps, disable=disable):
+        t_i = ts[i]
+        t_next = ts[i + 1]
+
+        # ---------- RF-churn (аналог sigma-churn у Karras) ----------
+        if s_churn > 0 and (s_tmin <= t_i <= s_tmax):
+            gamma = min(s_churn / n_steps, 2**0.5 - 1)
+        else:
+            gamma = 0.0
+
+        t_hat = t_i
+        if gamma > 0:
+            # поднимаем t до t_hat
+            t_hat = t_i * (1.0 + gamma)
+            # t в RF обычно в [0, 1]
+            if not torch.is_tensor(t_hat):
+                t_hat = min(t_hat, 1.0)
+            else:
+                t_hat = t_hat.clamp(max=1.0)
+
+            # RF-параметризация:
+            #   x_t = (1 - t) x0 + t eps
+            # хотим x_hat при t_hat, сохранив x0, но перераздав шум
+            eps = torch.randn_like(x) * s_noise
+
+            alpha_i = 1.0 - t_i
+            alpha_hat = 1.0 - t_hat
+
+            # A * x_i + B * eps → x_hat, где
+            #   A = alpha_hat / alpha_i
+            #   B^2 = t_hat^2 - t_i^2 * alpha_hat^2 / alpha_i^2
+            A = alpha_hat / alpha_i
+            B_sq = (
+                t_hat**2
+                - (t_i**2) * (alpha_hat**2) / (alpha_i**2)
+            )
+            B = B_sq.clamp_min(0.0).sqrt()
+
+            x = A * x + B * eps
+
+        # ---------- первая оценка производной при t_hat ----------
+        # модель даёт оценку x0 (denoised)
+        denoised = model(x, t_hat * s_in, **extra_args)
+
+        if callback is not None:
+            callback({
+                'x': x,
+                'i': i,
+                'sigma': t_i,          # для совместимости с внешним кодом
+                'sigma_hat': t_hat,    # на самом деле t и t_hat
+                'denoised': denoised,
+            })
+
+        # ODE RF: dx/dt = (x - x0) / t
+        # на последнем шаге t_hat > 0, поэтому деление безопасно
+        d = (x - denoised) / t_hat
+        dt = t_next - t_hat
+
+        # ---------- выбор схемы: Euler / Heun / Heun++ ----------
+        if t_next == t_end:
+            # Последний шаг → достаточно Эйлера
+            x = x + d * dt
+
+        elif ts[i + 2] == t_end:
+            # Предпоследний шаг → Heun (2 стадии)
+
+            # стадия 2: предсказание до t_next и оценка производной там
+            x_2 = x + d * dt
+            denoised_2 = model(x_2, t_next * s_in, **extra_args)
+            d_2 = (x_2 - denoised_2) / t_next
+
+            # веса Heun, зависящие от начального t0 (аналог sigmas[0])
+            # это перенесённые из sigma-варианта коэффициенты (эвристика)
+            t0 = ts[0]
+            w = 2.0 * t0
+            w2 = t_next / w
+            w1 = 1.0 - w2
+
+            d_prime = w1 * d + w2 * d_2
+            x = x + d_prime * dt
+
+        else:
+            # Основная часть траектории → Heun++ (3 стадии)
+
+            # стадия 2: t_hat → t_next
+            x_2 = x + d * dt
+            denoised_2 = model(x_2, t_next * s_in, **extra_args)
+            d_2 = (x_2 - denoised_2) / t_next
+
+            # стадия 3: t_next → t_{i+2}
+            t_next2 = ts[i + 2]
+            dt_2 = t_next2 - t_next
+
+            x_3 = x_2 + d_2 * dt_2
+            denoised_3 = model(x_3, t_next2 * s_in, **extra_args)
+            d_3 = (x_3 - denoised_3) / t_next2
+
+            # веса Heun++ (тоже перенесены из sigma-варианта)
+            t0 = ts[0]
+            w = 3.0 * t0
+            w2 = t_next / w
+            w3 = t_next2 / w
+            w1 = 1.0 - w2 - w3
+
+            d_prime = w1 * d + w2 * d_2 + w3 * d_3
+            x = x + d_prime * dt
+
+    return x

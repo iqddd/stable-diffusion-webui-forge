@@ -1,6 +1,7 @@
 import torch
 import math
 
+# Используем глобально выбранную реализацию attention (xformers / sub-quad / split / pytorch)
 from backend.attention import attention_pytorch as attention_function
 from transformers.activations import NewGELUActivation
 
@@ -204,6 +205,22 @@ class T5(torch.nn.Module):
     def forward(self, input_ids, *args, **kwargs):
         x = self.shared(input_ids)
         x = torch.nan_to_num(x)
+
+        # Переводим активации T5 в нижнюю точность, чтобы уменьшить VRAM.
+        # Веса (в т.ч. GGUF) при этом остаются как есть, но матмулы и активации идут в target_dtype.
+        target_dtype = x.dtype
+        dev = x.device
+
+        if hasattr(dev, "type") and dev.type == "cuda":
+            # На современных NVIDIA (Ampere+) предпочтительно bf16, иначе fp16.
+            if torch.cuda.is_bf16_supported():
+                target_dtype = torch.bfloat16
+            else:
+                target_dtype = torch.float16
+
+        if x.dtype != target_dtype:
+            x = x.to(target_dtype)
+
         return self.encoder(x, *args, **kwargs)
 
 

@@ -82,7 +82,17 @@ class Flux(ForgeDiffusionEngine):
 
     @torch.inference_mode()
     def get_learned_conditioning(self, prompt: list[str]):
-        memory_management.load_model_gpu(self.forge_objects.clip.patcher)
+        # Оценка пикового потребления VRAM T5-энкодером.
+        # Для T5-XXL (d_model=4096, ~24 слоёв) и длины последовательности ≈512
+        # замеры показали peak_delta_alloc ~2.8 GB в bf16.
+        # Используем чуть завышенный статический бюджет ~3 GB.
+        T5_MEMORY_REQUIRED_BYTES = 3 * 1024 * 1024 * 1024
+
+        memory_management.load_models_gpu(
+            [self.forge_objects.clip.patcher],
+            memory_required=T5_MEMORY_REQUIRED_BYTES
+        )
+
         cond_l, pooled_l = self.text_processing_engine_l(prompt)
         cond_t5 = self.text_processing_engine_t5(prompt)
         cond = dict(crossattn=cond_t5, vector=pooled_l)

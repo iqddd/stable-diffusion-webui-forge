@@ -5,7 +5,7 @@ from backend.misc import image_resize
 from backend import memory_management, state_dict, utils
 from backend.nn.cnets import cldm, t2i_adapter
 from backend.patcher.base import ModelPatcher
-from backend.operations import using_forge_operations, ForgeOperations, main_stream_worker, weights_manual_cast
+from backend.operations import using_forge_operations, ForgeOperations, main_stream_worker, materialize_weight_and_bias_for_compute
 
 
 def apply_controlnet_advanced(
@@ -369,7 +369,7 @@ class ControlLoraOps(ForgeOperations):
             self.bias = None
 
         def forward(self, input):
-            weight, bias, signal = weights_manual_cast(self, input)
+            weight, bias, signal = materialize_weight_and_bias_for_compute(self, input)
             with main_stream_worker(weight, bias, signal):
                 if self.up is not None:
                     return torch.nn.functional.linear(input, weight + (torch.mm(self.up.flatten(start_dim=1), self.down.flatten(start_dim=1))).reshape(self.weight.shape).type(input.dtype), bias)
@@ -409,7 +409,7 @@ class ControlLoraOps(ForgeOperations):
             self.down = None
 
         def forward(self, input):
-            weight, bias, signal = weights_manual_cast(self, input)
+            weight, bias, signal = materialize_weight_and_bias_for_compute(self, input)
             with main_stream_worker(weight, bias, signal):
                 if self.up is not None:
                     return torch.nn.functional.conv2d(input, weight + (torch.mm(self.up.flatten(start_dim=1), self.down.flatten(start_dim=1))).reshape(self.weight.shape).type(input.dtype), bias, self.stride, self.padding, self.dilation, self.groups)

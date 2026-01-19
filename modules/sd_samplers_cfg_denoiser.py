@@ -1,4 +1,5 @@
 import torch
+import math
 from modules import prompt_parser, sd_samplers_common
 
 from modules.shared import opts, state
@@ -7,6 +8,7 @@ from modules.script_callbacks import CFGDenoiserParams, cfg_denoiser_callback
 from modules.script_callbacks import CFGDenoisedParams, cfg_denoised_callback
 from modules.script_callbacks import AfterCFGCallbackParams, cfg_after_cfg_callback
 from backend.sampling.sampling_function import sampling_function
+from backend.patcher import lora
 
 
 def catenate_conds(conds):
@@ -195,6 +197,23 @@ class CFGDenoiser(torch.nn.Module):
             self.p.extra_generation_params["NGMS"] = s_min_uncond
             if shared.opts.s_min_uncond_all:
                 self.p.extra_generation_params["NGMS all steps"] = shared.opts.s_min_uncond_all
+
+        if shared.opts.lora_max_strength_at == 0 or self.p.is_hr_pass:
+            lora.current_progress = 1.0
+        else:
+            lora.current_progress = min(self.step / self.total_steps / shared.opts.lora_max_strength_at, 1.0)
+
+        if shared.opts.cfg_decay > 0:
+            steps_active = self.total_steps * shared.opts.cfg_decay
+            if self.step < steps_active:
+                k = self.step / steps_active
+                m = (cond_scale - 1)/2
+                cond_scale = math.cos(math.pi * k) * m + m + 1
+            else:
+                cond_scale = 1.0
+
+        # if self.step == 0 or self.step == 1:
+        #     cond_scale = 1.0
 
         denoised, cond_pred, uncond_pred = sampling_function(self, denoiser_params=denoiser_params, cond_scale=cond_scale, cond_composition=cond_composition)
 

@@ -2,7 +2,7 @@ import torch
 
 
 def load_state_dict(model, sd, ignore_errors=[], log_name=None, ignore_start=None):
-    missing, unexpected = model.load_state_dict(sd, strict=False)
+    missing, unexpected = model.load_state_dict(sd, strict=False)  # load_state_dict monkey-patched
     missing = [x for x in missing if x not in ignore_errors]
     unexpected = [x for x in unexpected if x not in ignore_errors]
 

@@ -49,7 +49,7 @@ class KModel(torch.nn.Module):
         area = input_shape[0] * input_shape[2] * input_shape[3]
         dtype_size = memory_management.dtype_size(self.computation_dtype)
 
-        if attention.attention_function in [attention.attention_pytorch, attention.attention_xformers]:
+        if attention.attention_function in [attention.attention_pytorch, attention.attention_xformers, attention.attention_sage]:
             scaler = 1.28
         else:
             scaler = 1.65

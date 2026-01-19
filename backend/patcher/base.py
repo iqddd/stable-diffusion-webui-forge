@@ -53,8 +53,6 @@ class ModelPatcher:
         self.size = size
         self.model = model
         self.lora_patches = {}
-        self.object_patches = {}
-        self.object_patches_backup = {}
         self.model_options = {"transformer_options": {}}
         self.model_size()
         self.load_device = load_device
@@ -79,7 +77,6 @@ class ModelPatcher:
     def clone(self):
         n = ModelPatcher(self.model, self.load_device, self.offload_device, self.size, self.current_device)
         n.lora_patches = self.lora_patches.copy()
-        n.object_patches = self.object_patches.copy()
         n.model_options = copy.deepcopy(self.model_options)
         return n
 
@@ -122,8 +119,8 @@ class ModelPatcher:
                 return True
         return False
 
-    def refresh_loras(self):
-        self.lora_loader.refresh(lora_patches=self.lora_patches, offload_device=self.offload_device)
+    def apply_lora_patches(self):
+        self.lora_loader.apply_patches(lora_patches=self.lora_patches, offload_device=self.offload_device)
         return
 
     def memory_required(self, input_shape):
@@ -194,18 +191,6 @@ class ModelPatcher:
     def set_model_output_block_patch(self, patch):
         self.set_model_patch(patch, "output_block_patch")
 
-    def add_object_patch(self, name, obj):
-        self.object_patches[name] = obj
-
-    def get_model_object(self, name):
-        if name in self.object_patches:
-            return self.object_patches[name]
-        else:
-            if name in self.object_patches_backup:
-                return self.object_patches_backup[name]
-            else:
-                return utils.get_attr(self.model, name)
-
     def model_patches_to(self, device):
         to = self.model_options["transformer_options"]
         if "patches" in to:
@@ -254,30 +239,16 @@ class ModelPatcher:
                     sd.pop(k)
         return sd
 
-    def forge_patch_model(self, target_device=None):
-        for k, item in self.object_patches.items():
-            old = utils.get_attr(self.model, k)
-
-            if k not in self.object_patches_backup:
-                self.object_patches_backup[k] = old
-
-            utils.set_attr_raw(self.model, k, item)
-
+    def move_to_device(self, target_device=None):
         if target_device is not None:
             self.model.to(target_device)
             self.current_device = target_device
-
         return self.model
 
+    # Backward-compat wrappers
+    def forge_patch_model(self, target_device=None):
+        return self.move_to_device(target_device)
+
+    # Backward-compat wrapper
     def forge_unpatch_model(self, target_device=None):
-        if target_device is not None:
-            self.model.to(target_device)
-            self.current_device = target_device
-
-        keys = list(self.object_patches_backup.keys())
-
-        for k in keys:
-            utils.set_attr_raw(self.model, k, self.object_patches_backup[k])
-
-        self.object_patches_backup = {}
-        return
+        return self.move_to_device(target_device)

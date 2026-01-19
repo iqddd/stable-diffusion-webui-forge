@@ -5,6 +5,8 @@ from typing import Dict, List, Tuple
 from weakref import WeakKeyDictionary
 import numpy as np
 import torch
+import torch.nn.functional as F
+import math
 
 import packages_3rdparty.webui_lora_collection.lora as lora_utils_webui
 import packages_3rdparty.comfyui_lora_collection.lora as lora_utils_comfyui
@@ -14,6 +16,8 @@ from backend import memory_management, utils
 
 extra_weight_calculators = {}
 lora_collection_priority = [lora_utils_webui, lora_utils_comfyui]
+current_progress = None
+current_koef = 1.0
 
 
 class BufferPool:
@@ -111,6 +115,81 @@ def model_lora_keys_unet(model, key_map={}):
     # TODO: OFT
 
     return key_maps
+
+
+@torch.inference_mode()
+def can_use_lora_linear_fast_path(patches, weight_shape):
+    if not patches:
+        return False
+
+    out_features = weight_shape[0]
+    in_features = math.prod(weight_shape[1:]) if len(weight_shape) > 1 else 1
+
+    for patch in patches:
+        strength, payload, strength_model, _, function = patch
+        if strength_model != 1.0 or function is not None:
+            return False
+
+        patch_type, values = payload[0], payload[1]
+        if patch_type != "lora":
+            return False
+
+        mat1, mat2 = values[0], values[1]
+        mat3 = values[3]
+        if mat3 is not None or mat1.dim() < 2 or mat2.dim() < 2:
+            return False
+        if mat1.shape[0] != out_features:
+            return False
+        if math.prod(mat2.shape[1:]) != in_features:
+            return False
+
+    return True
+
+
+@torch.inference_mode()
+def apply_lora_linear_delta(x, output, patches, device, computation_dtype):
+    global current_progress
+
+    if not patches:
+        return
+
+    left_blocks = []
+    right_blocks = []
+
+    for patch in patches:
+        strength, payload, strength_model, _, function = patch
+        assert strength_model == 1.0, "fast-path LoRA expected strength_model == 1.0"
+        assert function is None, "fast-path LoRA does not support post functions"
+
+        patch_type, values = payload[0], payload[1]
+        assert patch_type == "lora", "fast-path LoRA expects lora patch type"
+
+        mat1 = memory_management.cast_to_device(values[0], device, computation_dtype)
+        mat2 = memory_management.cast_to_device(values[1], device, computation_dtype)
+
+        alpha = values[2] / mat2.shape[0] if values[2] is not None else 1.0
+        scale = strength * alpha
+        if current_progress is not None and current_progress < 1 and current_progress >= 0:
+            scale = scale * current_progress
+
+        mat1_flat = mat1.flatten(start_dim=1).contiguous()
+        mat2_flat = mat2.flatten(start_dim=1).contiguous()
+
+        left_blocks.append(mat2_flat)
+        right_blocks.append(mat1_flat * scale)
+
+    if len(left_blocks) == 1:
+        left = left_blocks[0]
+        right = right_blocks[0]
+    else:
+        left = torch.cat(left_blocks, dim=0)
+        right = torch.cat(right_blocks, dim=1)
+
+    x_view = x.reshape(-1, x.shape[-1])
+    out_view = output.reshape(-1, output.shape[-1])
+
+    intermediate = F.linear(x_view, left, bias=None)
+    out_view.addmm_(intermediate, right.transpose(0, 1), beta=1.0, alpha=1.0)
 
 
 @torch.inference_mode()
@@ -432,7 +511,7 @@ class LoraLoader:
         self.loaded_hash = str([])
 
     @torch.inference_mode()
-    def refresh(self, lora_patches, offload_device=torch.device('cpu'), force_refresh=False):
+    def apply_patches(self, lora_patches, offload_device=torch.device('cpu'), force_refresh=False):
         hashes = str(list(lora_patches.keys()))
 
         if hashes == self.loaded_hash and not force_refresh:
@@ -503,7 +582,7 @@ class LoraLoader:
 
             bnb_layer = None
 
-            if hasattr(weight, 'bnb_quantized') and operations.bnb_avaliable:
+            if hasattr(weight, 'bnb_quantized') and operations.bnb_available:
                 bnb_layer = parent_layer
                 from backend.operations_bnb import functional_dequantize_4bit
                 weight = functional_dequantize_4bit(weight)

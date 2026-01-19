@@ -7,12 +7,24 @@ from torch import __version__
 import contextlib
 
 from backend import stream, memory_management, utils
-from backend.patcher.lora import merge_lora_to_weight
+from backend.patcher.lora import (
+    merge_lora_to_weight,
+    can_use_lora_linear_fast_path,
+    apply_lora_linear_delta,
+)
 
 stash = []
 
 
-def get_weight_and_bias(layer, weight_args=None, bias_args=None, weight_fn=None, bias_fn=None):
+def assemble_weight_and_bias(
+    layer,
+    weight_args=None,
+    bias_args=None,
+    weight_fn=None,
+    bias_fn=None,
+    merge_weight_lora=True,
+    merge_bias_lora=True,
+):
     scale_weight = getattr(layer, 'scale_weight', None)
     patches = getattr(layer, 'forge_online_loras', None)
     weight_patches, bias_patches = None, None
@@ -36,7 +48,7 @@ def get_weight_and_bias(layer, weight_args=None, bias_args=None, weight_fn=None,
             weight = weight.to(**weight_args)
         if scale_weight is not None:
             weight = weight*scale_weight.to(device=weight.device, dtype=weight.dtype)
-        if weight_patches is not None:
+        if weight_patches is not None and merge_weight_lora:
             weight = merge_lora_to_weight(patches=weight_patches, weight=weight, key="online weight lora", computation_dtype=weight.dtype)
 
     bias = None
@@ -50,12 +62,21 @@ def get_weight_and_bias(layer, weight_args=None, bias_args=None, weight_fn=None,
             bias = bias_fn(bias)
         if bias_args is not None:
             bias = bias.to(**bias_args)
-        if bias_patches is not None:
+        if bias_patches is not None and merge_bias_lora:
             bias = merge_lora_to_weight(patches=bias_patches, weight=bias, key="online bias lora", computation_dtype=bias.dtype)
     return weight, bias
 
 
-def weights_manual_cast(layer, x, skip_weight_dtype=False, skip_bias_dtype=False, weight_fn=None, bias_fn=None):
+def materialize_weight_and_bias_for_compute(
+    layer,
+    x,
+    skip_weight_dtype=False,
+    skip_bias_dtype=False,
+    weight_fn=None,
+    bias_fn=None,
+    merge_weight_lora=True,
+    merge_bias_lora=True,
+):
     weight, bias, signal = None, None, None
     non_blocking = True
 
@@ -77,13 +98,28 @@ def weights_manual_cast(layer, x, skip_weight_dtype=False, skip_bias_dtype=False
 
     if stream.should_use_stream():
         with stream.stream_context()(stream.mover_stream):
-            weight, bias = get_weight_and_bias(layer, weight_args, bias_args, weight_fn=weight_fn, bias_fn=bias_fn)
+            weight, bias = assemble_weight_and_bias(
+                layer,
+                weight_args,
+                bias_args,
+                weight_fn=weight_fn,
+                bias_fn=bias_fn,
+                merge_weight_lora=merge_weight_lora,
+                merge_bias_lora=merge_bias_lora,
+            )
             signal = stream.mover_stream.record_event()
     else:
-        weight, bias = get_weight_and_bias(layer, weight_args, bias_args, weight_fn=weight_fn, bias_fn=bias_fn)
+        weight, bias = assemble_weight_and_bias(
+            layer,
+            weight_args,
+            bias_args,
+            weight_fn=weight_fn,
+            bias_fn=bias_fn,
+            merge_weight_lora=merge_weight_lora,
+            merge_bias_lora=merge_bias_lora,
+        )
 
     return weight, bias, signal
-
 
 
 @contextlib.contextmanager
@@ -122,7 +158,7 @@ current_manual_cast_enabled = False
 current_bnb_dtype = None
 current_fp8_mode = None
 
-IS_TORCH_2_4 = __version__ < (2, 4, 9)
+TORCH_LT_2_5 = __version__ < (2, 5, 0)
 
 class ForgeOperations:
     class Linear(torch.nn.Module):
@@ -144,24 +180,6 @@ class ForgeOperations:
                 self.weight_initialized = False
                 self.max_value = torch.finfo(self.float8_dtype).max
                 self.input_max_value = torch.finfo(self.input_float8_dtype).max
-                # factory_kwargs = {"dtype": current_dtype, "device": current_device}
-                # if float_weight is None:
-                #     self.weight = nn.Parameter(
-                #         torch.empty((out_features, in_features), **factory_kwargs)
-                #     )
-                # else:
-                #     self.weight = nn.Parameter(
-                #         float_weight, requires_grad=float_weight.requires_grad
-                #     )
-                # if float_bias is None:
-                #     if bias:
-                #         self.bias = nn.Parameter(
-                #             torch.empty(out_features, **factory_kwargs),
-                #         )
-                #     else:
-                #         self.register_parameter("bias", None)
-                # else:
-                #     self.bias = nn.Parameter(float_bias, requires_grad=float_bias.requires_grad)
                 self.num_scale_trials = 12
                 self.register_buffer(
                     "input_amax_trials",
@@ -268,23 +286,64 @@ class ForgeOperations:
                 out_dtype=self.weight.dtype,
                 use_fast_accum=True,
             )
-            if IS_TORCH_2_4:
+            if TORCH_LT_2_5:
                 out = out[0]
             out = out.view(*prev_dims, self.out_features)
             return out
 
         def forward(self, x):
+            patches = getattr(self, 'forge_online_loras', None)
+            weight_patches = None
+            bias_patches = None
+            if patches is not None:
+                weight_patches = patches.get('weight', None)
+                bias_patches = patches.get('bias', None)
+
+            weight_shape = (
+                tuple(self.weight.shape)
+                if self.weight is not None
+                else (self.out_features, self.in_features)
+            )
+            fast_lora = bool(weight_patches) and can_use_lora_linear_fast_path(
+                weight_patches,
+                weight_shape,
+            )
+
             if self.parameters_manual_cast:
-                weight, bias, signal = weights_manual_cast(self, x)
+                weight, bias, signal = materialize_weight_and_bias_for_compute(
+                    self,
+                    x,
+                    merge_weight_lora=not fast_lora,
+                    merge_bias_lora=bias_patches is not None,
+                )
                 with main_stream_worker(weight, bias, signal):
                     if self.fp8_mode:
                         return self.fp8_forward(x)
+                    elif fast_lora and weight_patches:
+                        output = torch.nn.functional.linear(x, weight, bias)
+                        apply_lora_linear_delta(
+                            x,
+                            output,
+                            weight_patches,
+                            device=weight.device,
+                            computation_dtype=weight.dtype,
+                        )
+                        return output
                     else:
                         return torch.nn.functional.linear(x, weight, bias)
             else:
-                weight, bias = get_weight_and_bias(self)
                 if self.fp8_mode:
                     return self.fp8_forward(x)
+                elif fast_lora and weight_patches:
+                    output = torch.nn.functional.linear(x, weight, bias)
+                    apply_lora_linear_delta(
+                        x,
+                        output,
+                        weight_patches,
+                        device=weight.device,
+                        computation_dtype=weight.dtype,
+                    )
+                    return output
                 else:
                     return torch.nn.functional.linear(x, weight, bias)
 
@@ -301,11 +360,11 @@ class ForgeOperations:
 
         def forward(self, x):
             if self.parameters_manual_cast:
-                weight, bias, signal = weights_manual_cast(self, x)
-                with main_stream_worker(weight, bias, signal):
-                    return self._conv_forward(x, weight, bias)
+                    weight, bias, signal = materialize_weight_and_bias_for_compute(self, x)
+                    with main_stream_worker(weight, bias, signal):
+                        return self._conv_forward(x, weight, bias)
             else:
-                weight, bias = get_weight_and_bias(self)
+                weight, bias = assemble_weight_and_bias(self)
                 return super()._conv_forward(x, weight, bias)
 
     class Conv3d(torch.nn.Conv3d):
@@ -321,11 +380,11 @@ class ForgeOperations:
 
         def forward(self, x):
             if self.parameters_manual_cast:
-                weight, bias, signal = weights_manual_cast(self, x)
+                weight, bias, signal = materialize_weight_and_bias_for_compute(self, x)
                 with main_stream_worker(weight, bias, signal):
                     return self._conv_forward(x, weight, bias)
             else:
-                weight, bias = get_weight_and_bias(self)
+                weight, bias = assemble_weight_and_bias(self)
                 return super()._conv_forward(input, weight, bias)
 
     class Conv1d(torch.nn.Conv1d):
@@ -341,11 +400,11 @@ class ForgeOperations:
 
         def forward(self, x):
             if self.parameters_manual_cast:
-                weight, bias, signal = weights_manual_cast(self, x)
+                weight, bias, signal = materialize_weight_and_bias_for_compute(self, x)
                 with main_stream_worker(weight, bias, signal):
                     return self._conv_forward(x, weight, bias)
             else:
-                weight, bias = get_weight_and_bias(self)
+                weight, bias = assemble_weight_and_bias(self)
                 return super()._conv_forward(input, weight, bias)
 
     class ConvTranspose2d(torch.nn.ConvTranspose2d):
@@ -364,11 +423,11 @@ class ForgeOperations:
                 num_spatial_dims = 2
                 output_padding = self._output_padding(x, output_size, self.stride, self.padding, self.kernel_size, num_spatial_dims, self.dilation)
 
-                weight, bias, signal = weights_manual_cast(self, x)
+                weight, bias, signal = materialize_weight_and_bias_for_compute(self, x)
                 with main_stream_worker(weight, bias, signal):
                     return torch.nn.functional.conv_transpose2d(x, weight, bias, self.stride, self.padding, output_padding, self.groups, self.dilation)
             else:
-                weight, bias = get_weight_and_bias(self)
+                weight, bias = assemble_weight_and_bias(self)
                 num_spatial_dims = 2
                 output_padding = self._output_padding(x, output_size, self.stride, self.padding, self.kernel_size, num_spatial_dims, self.dilation)
                 return torch.nn.functional.conv_transpose2d(x, weight, bias, self.stride, self.padding, output_padding, self.groups, self.dilation)
@@ -389,11 +448,11 @@ class ForgeOperations:
                 num_spatial_dims = 1
                 output_padding = self._output_padding(x, output_size, self.stride, self.padding, self.kernel_size, num_spatial_dims, self.dilation)
 
-                weight, bias, signal = weights_manual_cast(self, x)
+                weight, bias, signal = materialize_weight_and_bias_for_compute(self, x)
                 with main_stream_worker(weight, bias, signal):
                     return torch.nn.functional.conv_transpose1d(x, weight, bias, self.stride, self.padding, output_padding, self.groups, self.dilation)
             else:
-                weight, bias = get_weight_and_bias(self)
+                weight, bias = assemble_weight_and_bias(self)
                 num_spatial_dims = 1
                 output_padding = self._output_padding(x, output_size, self.stride, self.padding, self.kernel_size, num_spatial_dims, self.dilation)
                 return torch.nn.functional.conv_transpose2d(x, weight, bias, self.stride, self.padding, output_padding, self.groups, self.dilation)
@@ -414,11 +473,11 @@ class ForgeOperations:
                 num_spatial_dims = 3
                 output_padding = self._output_padding(x, output_size, self.stride, self.padding, self.kernel_size, num_spatial_dims, self.dilation)
 
-                weight, bias, signal = weights_manual_cast(self, x)
+                weight, bias, signal = materialize_weight_and_bias_for_compute(self, x)
                 with main_stream_worker(weight, bias, signal):
                     return torch.nn.functional.conv_transpose3d(x, weight, bias, self.stride, self.padding, output_padding, self.groups, self.dilation)
             else:
-                weight, bias = get_weight_and_bias(self)
+                weight, bias = assemble_weight_and_bias(self)
                 num_spatial_dims = 3
                 output_padding = self._output_padding(x, output_size, self.stride, self.padding, self.kernel_size, num_spatial_dims, self.dilation)
                 return torch.nn.functional.conv_transpose2d(x, weight, bias, self.stride, self.padding, output_padding, self.groups, self.dilation)
@@ -436,7 +495,7 @@ class ForgeOperations:
 
         def forward(self, x):
             if self.parameters_manual_cast:
-                weight, bias, signal = weights_manual_cast(self, x)
+                weight, bias, signal = materialize_weight_and_bias_for_compute(self, x)
                 with main_stream_worker(weight, bias, signal):
                     return torch.nn.functional.group_norm(x, self.num_groups, weight, bias, self.eps)
             else:
@@ -455,7 +514,7 @@ class ForgeOperations:
 
         def forward(self, x):
             if self.parameters_manual_cast:
-                weight, bias, signal = weights_manual_cast(self, x)
+                weight, bias, signal = materialize_weight_and_bias_for_compute(self, x)
                 with main_stream_worker(weight, bias, signal):
                     return torch.nn.functional.layer_norm(x, self.normalized_shape, weight, bias, self.eps)
             else:
@@ -475,7 +534,7 @@ class ForgeOperations:
 
         def forward(self, x):
             if self.parameters_manual_cast:
-                weight, bias, signal = weights_manual_cast(self, x, skip_weight_dtype=True, skip_bias_dtype=True)
+                weight, bias, signal = materialize_weight_and_bias_for_compute(self, x, skip_weight_dtype=True, skip_bias_dtype=True)
                 with main_stream_worker(weight, bias, signal):
                     return torch.nn.functional.embedding(x, weight, self.padding_idx, self.max_norm, self.norm_type, self.scale_grad_by_freq, self.sparse)
             else:
@@ -565,13 +624,13 @@ try:
                     self.weight = self.weight.to(layer_original_device)
                     return out
                 else:
-                    weight, bias, signal = weights_manual_cast(self, x, skip_weight_dtype=True, skip_bias_dtype=True)
+                    weight, bias, signal = materialize_weight_and_bias_for_compute(self, x, skip_weight_dtype=True, skip_bias_dtype=True)
                     with main_stream_worker(weight, bias, signal):
                         return functional_linear_4bits(x, weight, bias)
 
-    bnb_avaliable = True
+    bnb_available = True
 except:
-    bnb_avaliable = False
+    bnb_available = False
 
 
 from backend.operations_gguf import dequantize_tensor
@@ -618,7 +677,7 @@ class ForgeOperationsGGUF(ForgeOperations):
             if self.weight is not None and self.weight.dtype != x.dtype and getattr(self.weight, 'gguf_cls', None) is None:
                 self.weight = utils.tensor2parameter(self.weight.to(x.dtype))
 
-            weight, bias, signal = weights_manual_cast(self, x, weight_fn=dequantize_tensor, bias_fn=None, skip_bias_dtype=True)
+            weight, bias, signal = materialize_weight_and_bias_for_compute(self, x, weight_fn=dequantize_tensor, bias_fn=None, skip_bias_dtype=True)
             with main_stream_worker(weight, bias, signal):
                 return torch.nn.functional.linear(x, weight, bias)
 
@@ -632,7 +691,7 @@ def using_forge_operations(operations=None, device=None, dtype=None, manual_cast
     if operations is None:
         if bnb_dtype in ['gguf']:
             operations = ForgeOperationsGGUF
-        elif bnb_avaliable and bnb_dtype in ['nf4', 'fp4']:
+        elif bnb_available and bnb_dtype in ['nf4', 'fp4']:
             operations = ForgeOperationsBNB4bits
         else:
             operations = ForgeOperations
@@ -700,7 +759,7 @@ def automatic_memory_management():
     return
 
 
-class DynamicSwapInstaller:
+class DynamicSwapInstaller:  # <- Dead code?
     @staticmethod
     def _install_module(module: torch.nn.Module, target_device: torch.device):
         original_class = module.__class__

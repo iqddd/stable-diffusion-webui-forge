@@ -102,7 +102,8 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
     online_mode = dynamic_args.get('online_lora', False)
 
     if current_sd.forge_objects.unet.model.storage_dtype in [torch.float32, torch.float16, torch.bfloat16]:
-        online_mode = False
+        # online_mode = False
+        pass
 
     compiled_lora_targets = []
     for a, b, c in zip(networks_on_disk, unet_multipliers, te_multipliers):

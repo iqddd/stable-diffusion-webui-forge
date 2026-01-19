@@ -194,7 +194,7 @@ def refresh_memory_management_settings(async_loading=None, inference_memory=None
 
     log_dict = dict(
         stream=stream.should_use_stream(),
-        inference_memory=memory_management.minimum_inference_memory() / (1024 * 1024),
+        inference_memory=memory_management.get_inference_memory_budget() / (1024 * 1024),
         pin_shared_memory=memory_management.PIN_SHARED_MEMORY
     )
 

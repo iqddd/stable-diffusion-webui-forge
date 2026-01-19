@@ -62,7 +62,7 @@ class BlockCache(scripts.Script):
             method = gr.Radio(label="Method", choices=["First Block Cache", "TeaCache"], type="value", value="First Block Cache")
             with gr.Row():
                 nocache_steps = gr.Number(label="Uncached starting steps", scale=0,
-                    minimum=1, maximum=12, value=1, step=1,
+                    minimum=1, maximum=99, value=1, step=1,
                 )
                 threshold = gr.Slider(label="caching threshold, higher values cache more aggressively.", 
                     minimum=0.0, maximum=1.0, value=0.1, step=0.001,

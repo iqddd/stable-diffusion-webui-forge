@@ -407,12 +407,12 @@ def module_size(module, exclude_device=None, include_device=None, return_split=F
     return module_mem
 
 
-def module_move(module, device, recursive=True, excluded_pattens=[]):
+def module_move(module, device, recursive=True, excluded_patterns=[]):
     if recursive:
         return module.to(device=device)
 
     for k, p in module.named_parameters(recurse=False, remove_duplicate=True):
-        if k in excluded_pattens:
+        if k in excluded_patterns:
             continue
         setattr(module, k, utils.tensor2parameter(p.to(device=device)))
 
@@ -464,6 +464,7 @@ class LoadedModel:
         self.device = model.load_device
         self.inclusive_memory = 0
         self.exclusive_memory = 0
+        self.current_gpu_footprint = 0
 
     def compute_inclusive_exclusive_memory(self):
         self.inclusive_memory = module_size(self.model.model, include_device=self.device)
@@ -471,68 +472,66 @@ class LoadedModel:
         return
 
     def model_load(self, model_gpu_memory_when_using_cpu_swap=-1):
-        patch_model_to = None
-        do_not_need_cpu_swap = model_gpu_memory_when_using_cpu_swap < 0
+        """
+        Load/arrange model according to GPU cap:
+          - cap < 0: full GPU
+          - cap >= 0: CPU-swap with streaming (pinned masters)
+        """
+        patch_model_to = self.device if model_gpu_memory_when_using_cpu_swap < 0 else None
 
-        if do_not_need_cpu_swap:
-            patch_model_to = self.device
-
+        # Prepare patches / dtype first
         self.model.model_patches_to(self.device)
         self.model.model_patches_to(self.model.model_dtype())
 
+        # Build or move the real torch.nn.Module
         try:
-            self.real_model = self.model.forge_patch_model(patch_model_to)
+            self.real_model = self.model.move_to_device(patch_model_to)
             self.model.current_device = self.model.load_device
         except Exception as e:
-            self.model.forge_unpatch_model(self.model.offload_device)
+            self.model.move_to_device(self.model.offload_device)
             self.model_unload()
             raise e
 
-        if do_not_need_cpu_swap:
+        # Full GPU path
+        if model_gpu_memory_when_using_cpu_swap < 0:
             print('All loaded to GPU.')
+            self.current_gpu_footprint = self.inclusive_memory + self.exclusive_memory
         else:
-            gpu_modules, gpu_modules_only_extras, cpu_modules = build_module_profile(self.real_model, model_gpu_memory_when_using_cpu_swap)
+            # Planned split
+            gpu_modules, gpu_modules_only_extras, cpu_modules = build_module_profile(
+                self.real_model, model_gpu_memory_when_using_cpu_swap
+            )
             pin_memory = PIN_SHARED_MEMORY and is_device_cpu(self.model.offload_device)
 
             mem_counter = 0
             swap_counter = 0
 
-            for m in gpu_modules:
-                m.to(self.device)
-                mem_counter += m.total_mem
+            # 1) Full GPU parts
+            mem_counter += move_modules_to_gpu(gpu_modules, self.device)
 
-            for m in cpu_modules:
-                m.prev_parameters_manual_cast = m.parameters_manual_cast
-                m.parameters_manual_cast = True
-                m.to(self.model.offload_device)
-                if pin_memory:
-                    m._apply(lambda x: x.pin_memory())
-                swap_counter += m.total_mem
+            # 2) CPU-only parts (fully pinned and stream-ready)
+            swap_counter += prepare_cpu_modules(cpu_modules, self.model.offload_device, pin_memory)
 
-            for m in gpu_modules_only_extras:
-                m.prev_parameters_manual_cast = m.parameters_manual_cast
-                m.parameters_manual_cast = True
-                module_move(m, device=self.device, recursive=False, excluded_pattens=['weight'])
-                if hasattr(m, 'weight') and m.weight is not None:
-                    if pin_memory:
-                        m.weight = utils.tensor2parameter(m.weight.to(self.model.offload_device).pin_memory())
-                    else:
-                        m.weight = utils.tensor2parameter(m.weight.to(self.model.offload_device))
-                mem_counter += m.extra_mem
-                swap_counter += m.weight_mem
+            # 3) Hybrid parts (extras on GPU, weights on CPU pinned)
+            inc_mem, inc_swap = prepare_gpu_modules_only_extras(
+                gpu_modules_only_extras, self.device, self.model.offload_device, pin_memory
+            )
+            mem_counter += inc_mem
+            swap_counter += inc_swap
 
             swap_flag = 'Shared' if PIN_SHARED_MEMORY else 'CPU'
             method_flag = 'asynchronous' if stream.should_use_stream() else 'blocked'
             print(f"{swap_flag} Swap Loaded ({method_flag} method): {swap_counter / (1024 * 1024):.2f} MB, GPU Loaded: {mem_counter / (1024 * 1024):.2f} MB")
 
+            self.current_gpu_footprint = mem_counter
             self.model_accelerated = True
 
             global signal_empty_cache
             signal_empty_cache = True
 
+        # Final touches
         bake_gguf_model(self.real_model)
-
-        self.model.refresh_loras()
+        self.model.apply_lora_patches()
 
         if is_intel_xpu() and not args.disable_ipex_hijack:
             self.real_model = torch.xpu.optimize(self.real_model.eval(), inplace=True, auto_kernel_selection=True, graph_mode=True)
@@ -540,6 +539,7 @@ class LoadedModel:
         return self.real_model
 
     def model_unload(self, avoid_model_moving=False):
+        self.current_gpu_footprint = 0
         if self.model_accelerated:
             for m in self.real_model.modules():
                 if hasattr(m, "prev_parameters_manual_cast"):
@@ -549,10 +549,50 @@ class LoadedModel:
             self.model_accelerated = False
 
         if avoid_model_moving:
-            self.model.forge_unpatch_model()
+            self.model.move_to_device()
         else:
-            self.model.forge_unpatch_model(self.model.offload_device)
+            bytes_to_move = module_size(self.model.model, exclude_device=self.model.offload_device)
+            t0 = time.perf_counter()
+            self.model.move_to_device(self.model.offload_device)
             self.model.model_patches_to(self.model.offload_device)
+            t1 = time.perf_counter()
+            if bytes_to_move > 0:
+                moved_mb = bytes_to_move / (1024 * 1024)
+                dt = max(1e-6, t1 - t0)
+                bandwidth_gbps = bytes_to_move / dt / (1024 * 1024 * 1024)
+                print(f"Offload: moved {moved_mb:.2f} MB to {self.model.offload_device} in {dt:.2f} s ({bandwidth_gbps:.2f} GB/s)")
+
+    def discharge_memory(self, memory_to_free):
+        freed_memory = 0
+
+        gpu_modules = []
+        for m in self.real_model.modules():
+            if hasattr(m, 'weight') and m.weight is not None:
+                if m.weight.device.type != 'cpu':
+                    gpu_modules.append(m)
+
+        # Unload from the end (usually output blocks) to minimize impact or fragmentation
+        for m in reversed(gpu_modules):
+            if freed_memory >= memory_to_free:
+                break
+
+            weight_size = m.weight.nelement() * m.weight.element_size()
+
+            dst = self.model.offload_device
+            if PIN_SHARED_MEMORY and is_device_cpu(dst):
+                # Single-pass GPU -> CPU(pinned) with reusable per-parameter buffer
+                ensure_pinned_param(m.weight, dst, non_blocking=device_should_use_non_blocking(dst))
+            else:
+                # Fallback: regular move without pinning
+                m.weight.data = m.weight.data.to(dst)
+
+            # Ensure Dynamic Swap will pick this up later
+            m.parameters_manual_cast = True
+
+            freed_memory += weight_size
+
+        self.current_gpu_footprint -= freed_memory
+        return freed_memory
 
     def __eq__(self, other):
         return self.model is other.model  # and self.memory_required == other.memory_required
@@ -561,7 +601,7 @@ class LoadedModel:
 current_inference_memory = 1024 * 1024 * 1024
 
 
-def minimum_inference_memory():
+def get_inference_memory_budget():
     global current_inference_memory
     return current_inference_memory
 
@@ -594,13 +634,34 @@ def free_memory(memory_required, device, keep_loaded=[], free_all=False):
     unloaded_model = False
     for i in range(len(current_loaded_models) - 1, -1, -1):
         if not offload_everything:
-            free_memory = get_free_memory(device)
-            print(f"Current free memory is {free_memory / (1024 * 1024):.2f} MB ... ", end="")
-            if free_memory > memory_required:
+            current_free_memory = get_free_memory(device)
+            print(f"Current free memory is {current_free_memory / (1024 * 1024):.2f} MB ... ", end="")
+            if current_free_memory > memory_required:
                 break
+        
         shift_model = current_loaded_models[i]
         if shift_model.device == device:
             if shift_model not in keep_loaded:
+                # Try adaptive discharge first
+                if not offload_everything:
+                    needed = memory_required - current_free_memory
+                    # Calculate total model size. inclusive_memory is 0 for models loaded from CPU initially, so we sum both.
+                    model_total_size = shift_model.inclusive_memory + shift_model.exclusive_memory
+                    
+                    # Only attempt partial unload if:
+                    # 1. We need to free LESS than the total model size (otherwise just unload it all)
+                    if model_total_size > 0 and needed > 0 and needed < model_total_size:
+                        print(f"Partial unload {shift_model.model.model.__class__.__name__} ({needed / (1024 * 1024):.2f} MB) ... ", end="")
+                        discharged = shift_model.discharge_memory(needed)
+                        print(f"Freed {discharged / (1024 * 1024):.2f} MB ... ", end="")
+                        
+                        # Update free memory check
+                        current_free_memory = get_free_memory(device)
+                        if current_free_memory > memory_required:
+                            print("Done.")
+                            soft_empty_cache()
+                            break
+
                 m = current_loaded_models.pop(i)
                 print(f"Unload model {m.model.model.__class__.__name__} ", end="")
                 m.model_unload()
@@ -631,77 +692,75 @@ def compute_model_gpu_memory_when_using_cpu_swap(current_free_mem, inference_mem
 
 
 def load_models_gpu(models, memory_required=0, hard_memory_preservation=1200*1024*1024):
+    """
+    Загрузка моделей с учётом бюджета GPU Weights, резерва под инференс
+    и CPU-swap (partial offload) — с упрощённым, читабельным планированием.
+    """
     global vram_state
 
     execution_start_time = time.perf_counter()
-    memory_to_free = max(minimum_inference_memory(), memory_required) + hard_memory_preservation
-    memory_for_inference = minimum_inference_memory() + hard_memory_preservation
 
-    models_to_load = []
-    models_already_loaded = []
+    # 1) Посчитать эффективный запас под инференс
+    global_inf = get_inference_memory_budget()
+    local_inf = memory_required or 0
+    safety_margin = 512 * 1024 * 1024
+    base_inf = max(global_inf, local_inf + safety_margin)
+    memory_for_inference = base_inf + hard_memory_preservation
+
+    # 2) Обёртки и LRU-перестановка
+    model_wrappers, models_to_load = [], []
     for x in models:
-        loaded_model = LoadedModel(x)
-
-        if loaded_model in current_loaded_models:
-            index = current_loaded_models.index(loaded_model)
+        tmp = LoadedModel(x)
+        if tmp in current_loaded_models:
+            index = current_loaded_models.index(tmp)
+            loaded_model = current_loaded_models[index]
             current_loaded_models.insert(0, current_loaded_models.pop(index))
-            models_already_loaded.append(loaded_model)
         else:
+            loaded_model = tmp
             models_to_load.append(loaded_model)
+        model_wrappers.append(loaded_model)
 
-    if len(models_to_load) == 0:
-        devs = set(map(lambda a: a.device, models_already_loaded))
-        for d in devs:
-            if d != torch.device("cpu"):
-                free_memory(memory_to_free, d, models_already_loaded)
-
-        moving_time = time.perf_counter() - execution_start_time
-        if moving_time > 0.1:
-            print(f'Memory cleanup has taken {moving_time:.2f} seconds')
-
-        return
-
+    # 3) Выгрузить клоны только для новых
     for loaded_model in models_to_load:
         unload_model_clones(loaded_model.model)
 
-    total_memory_required = {}
-    for loaded_model in models_to_load:
+    # 4) Размеры inclusive/exclusive
+    for loaded_model in model_wrappers:
         loaded_model.compute_inclusive_exclusive_memory()
-        total_memory_required[loaded_model.device] = total_memory_required.get(loaded_model.device, 0) + loaded_model.exclusive_memory + loaded_model.inclusive_memory * 0.25
 
-    for device in total_memory_required:
-        if device != torch.device("cpu"):
-            free_memory(total_memory_required[device] * 1.3 + memory_to_free, device, models_already_loaded)
+    # 5) Бюджет под веса на GPU
+    total_vram_bytes = int(total_vram) * 1024 * 1024
+    weights_budget_bytes = max(0, total_vram_bytes - int(memory_for_inference))
 
-    for loaded_model in models_to_load:
+    # 6) Группы по устройствам
+    targets_by_device = {}
+    for loaded_model in model_wrappers:
+        dev = loaded_model.device
+        targets_by_device.setdefault(dev, []).append(loaded_model)
+
+    # 7) Распределение квот по устройствам
+    per_model_gpu_cap = {}
+    for device, target_group in targets_by_device.items():
+        caps = assign_caps_for_device(device, target_group, weights_budget_bytes)
+        per_model_gpu_cap.update(caps)
+
+    # 8) Применить квоты/режимы
+    for loaded_model in model_wrappers:
         model = loaded_model.model
         torch_dev = model.load_device
-        if is_device_cpu(torch_dev):
-            vram_set_state = VRAMState.DISABLED
-        else:
-            vram_set_state = vram_state
 
-        model_gpu_memory_when_using_cpu_swap = -1
+        model_gpu_memory_when_using_cpu_swap = per_model_gpu_cap.get(loaded_model.model, -1)
 
-        if lowvram_available and (vram_set_state == VRAMState.LOW_VRAM or vram_set_state == VRAMState.NORMAL_VRAM):
-            model_require = loaded_model.exclusive_memory
-            previously_loaded = loaded_model.inclusive_memory
-            current_free_mem = get_free_memory(torch_dev)
-            estimated_remaining_memory = current_free_mem - model_require - memory_for_inference
-
-            print(f"[Memory Management] Target: {loaded_model.model.model.__class__.__name__}, Free GPU: {current_free_mem / (1024 * 1024):.2f} MB, Model Require: {model_require / (1024 * 1024):.2f} MB, Previously Loaded: {previously_loaded / (1024 * 1024):.2f} MB, Inference Require: {memory_for_inference / (1024 * 1024):.2f} MB, Remaining: {estimated_remaining_memory / (1024 * 1024):.2f} MB, ", end="")
-
-            if estimated_remaining_memory < 0:
-                vram_set_state = VRAMState.LOW_VRAM
-                model_gpu_memory_when_using_cpu_swap = compute_model_gpu_memory_when_using_cpu_swap(current_free_mem, memory_for_inference)
-                if previously_loaded > 0:
-                    model_gpu_memory_when_using_cpu_swap = previously_loaded
-
-        if vram_set_state == VRAMState.NO_VRAM:
+        if vram_state == VRAMState.NO_VRAM and not is_device_cpu(torch_dev):
             model_gpu_memory_when_using_cpu_swap = 0
 
         loaded_model.model_load(model_gpu_memory_when_using_cpu_swap)
-        current_loaded_models.insert(0, loaded_model)
+
+        if loaded_model in current_loaded_models:
+            idx = current_loaded_models.index(loaded_model)
+            current_loaded_models.insert(0, current_loaded_models.pop(idx))
+        else:
+            current_loaded_models.insert(0, loaded_model)
 
     moving_time = time.perf_counter() - execution_start_time
     print(f'Moving model(s) has taken {moving_time:.2f} seconds')
@@ -944,6 +1003,209 @@ def device_should_use_non_blocking(device):
     # return True #TODO: figure out why this causes memory issues on Nvidia and possibly others
 
 
+def is_tensor_pinned(t):
+    try:
+        return t.device.type == 'cpu' and hasattr(t, 'is_pinned') and t.is_pinned()
+    except:
+        return False
+
+
+def ensure_pinned_param(p, dst, non_blocking=False):
+    """
+    Ensure parameter p has its storage on CPU pinned memory at device=dst.
+    Reuses per-parameter pinned buffer if available and compatible.
+    """
+    if not hasattr(dst, 'type') or dst.type != 'cpu':
+        return p
+
+    buf = getattr(p, "_forge_offload_buffer", None)
+    need_new = (
+        buf is None
+        or buf.shape != p.shape
+        or buf.dtype != p.dtype
+        or buf.device != dst
+        or not is_tensor_pinned(buf)
+    )
+    if need_new:
+        buf = torch.empty_like(p.data, device=dst, pin_memory=True)
+        try:
+            setattr(p, "_forge_offload_buffer", buf)
+        except Exception:
+            # best-effort: if setattr blocked by a custom Parameter subclass, still proceed
+            pass
+
+    # Single-pass copy to pinned CPU
+    buf.copy_(p.data.detach(), non_blocking=non_blocking)
+    # Keep the Parameter object, replace only its storage
+    p.data = buf
+    return p
+
+
+def ensure_module_pinned(mod, dst):
+    """
+    Move entire module subtree to CPU pinned memory (parameters and buffers).
+    Reuses existing per-parameter pinned buffers when possible.
+    """
+    if not hasattr(dst, 'type') or dst.type != 'cpu':
+        return mod
+
+    nb = device_should_use_non_blocking(dst)
+
+    for sub in mod.modules():
+        # Parameters: keep Parameter subclasses, swap storage to pinned buffers
+        for name, p in sub.named_parameters(recurse=False, remove_duplicate=True):
+            if p is None:
+                continue
+            ensure_pinned_param(p, dst, non_blocking=nb)
+
+        # Buffers: replace with pinned clones
+        for name, b in sub.named_buffers(recurse=False, remove_duplicate=True):
+            if b is None:
+                continue
+            if b.device != dst or not is_tensor_pinned(b):
+                bufb = torch.empty_like(b, device=dst, pin_memory=True)
+                bufb.copy_(b.detach(), non_blocking=nb)
+                setattr(sub, name, bufb)
+
+    return mod
+
+
+# ---------------------------
+# Small helpers to reduce nesting in model_load/load_models_gpu
+# ---------------------------
+
+def move_modules_to_gpu(gpu_modules, device):
+    mem_counter = 0
+    for m in gpu_modules:
+        m.to(device)
+        mem_counter += m.total_mem
+    return mem_counter
+
+
+def prepare_cpu_modules(cpu_modules, offload_device, pin_memory):
+    swap_counter = 0
+    for m in cpu_modules:
+        m.prev_parameters_manual_cast = m.parameters_manual_cast
+        m.parameters_manual_cast = True
+        if pin_memory and is_device_cpu(offload_device):
+            ensure_module_pinned(m, offload_device)
+        else:
+            m.to(offload_device)
+            if pin_memory:
+                m._apply(lambda x: x.pin_memory())
+        swap_counter += m.total_mem
+    return swap_counter
+
+
+def prepare_gpu_modules_only_extras(modules, device, offload_device, pin_memory):
+    mem_counter_inc, swap_counter_inc = 0, 0
+    for m in modules:
+        m.prev_parameters_manual_cast = m.parameters_manual_cast
+        m.parameters_manual_cast = True
+        module_move(m, device=device, recursive=False, excluded_patterns=['weight'])
+        if hasattr(m, 'weight') and m.weight is not None:
+            if pin_memory and is_device_cpu(offload_device):
+                ensure_pinned_param(m.weight, offload_device, non_blocking=device_should_use_non_blocking(offload_device))
+            else:
+                m.weight.data = m.weight.data.to(offload_device)
+        mem_counter_inc += m.extra_mem
+        swap_counter_inc += m.weight_mem
+    return mem_counter_inc, swap_counter_inc
+
+
+def soft_offload_model(loaded_model):
+    """
+    Move entire real_model to CPU pinned memory, prepare for streaming, zero GPU footprint.
+    Returns True if soft offload applied, False if fallback (no real_model).
+    """
+    try:
+        if hasattr(loaded_model, "real_model") and loaded_model.real_model is not None:
+            ensure_module_pinned(loaded_model.real_model, loaded_model.model.offload_device)
+            for sub in loaded_model.real_model.modules():
+                if hasattr(sub, "parameters_manual_cast"):
+                    sub.parameters_manual_cast = True
+            loaded_model.current_gpu_footprint = 0
+            loaded_model.model_accelerated = True
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def assign_caps_for_device(device, target_group, weights_budget_bytes):
+    """
+    Compute per-model GPU caps for a single device, applying soft offload/discharge to other models if needed.
+    Returns dict {model: cap}.
+    """
+    per_cap = {}
+    if is_device_cpu(device):
+        return per_cap
+
+    size_of = lambda lm: lm.inclusive_memory + lm.exclusive_memory
+    def cap_all(v):
+        for lm in target_group:
+            per_cap[lm.model] = v
+        return per_cap
+
+    # Full size S for target group on this device
+    total_target_size = sum(size_of(lm) for lm in target_group)
+
+    # Split current models on this device
+    group_models = [m for m in current_loaded_models if m.device == device]
+    other_models = [m for m in group_models if m not in target_group]
+    gpu_others_current = sum(m.current_gpu_footprint for m in other_models)
+
+    def soft_offload_or_unload_model(m):
+        if not soft_offload_model(m):
+            m.model_unload()
+            if m in current_loaded_models:
+                current_loaded_models.remove(m)
+
+    # Case W <= 0: no budget for GPU weights
+    if weights_budget_bytes <= 0:
+        for m in list(other_models):
+            soft_offload_or_unload_model(m)
+        soft_empty_cache()
+        return cap_all(0)
+
+    # Case S <= W: keep whole target on GPU, free others just enough
+    if total_target_size <= weights_budget_bytes:
+        gpu_others_max = max(0, weights_budget_bytes - total_target_size)
+        to_free = max(0, gpu_others_current - gpu_others_max)
+
+        if to_free > 0 and other_models:
+            for m in sorted(other_models, key=lambda x: x.current_gpu_footprint):
+                if to_free <= 0:
+                    break
+                current = m.current_gpu_footprint
+                if current <= 0:
+                    continue
+                if current <= to_free:
+                    soft_offload_or_unload_model(m)
+                    to_free -= current
+                else:
+                    freed = m.discharge_memory(to_free)
+                    to_free -= freed
+            soft_empty_cache()
+
+        return cap_all(-1)
+
+    # Case S > W: soft-offload all other models, then split budget proportionally
+    for m in list(other_models):
+        soft_offload_or_unload_model(m)
+    soft_empty_cache()
+
+    if total_target_size <= 0:
+        return cap_all(0)
+
+    for lm in target_group:
+        sz = size_of(lm)
+        cap = int(weights_budget_bytes * (float(sz) / float(total_target_size))) if sz > 0 else 0
+        per_cap[lm.model] = max(0, cap)
+
+    return per_cap
+
+
 def force_channels_last():
     if args.force_channels_last:
         return True
@@ -1130,7 +1392,7 @@ def should_use_fp16(device=None, model_params=0, prioritize_performance=True, ma
         if x in props.name.lower():
             if manual_cast:
                 # For storage dtype
-                free_model_memory = (get_free_memory() * 0.9 - minimum_inference_memory())
+                free_model_memory = (get_free_memory() * 0.9 - get_inference_memory_budget())
                 if (not prioritize_performance) or model_params * 4 > free_model_memory:
                     return True
             else:
@@ -1185,7 +1447,7 @@ def should_use_bf16(device=None, model_params=0, prioritize_performance=True, ma
         # So in this case bf16 should only be used as storge dtype
         if manual_cast:
             # For storage dtype
-            free_model_memory = (get_free_memory() * 0.9 - minimum_inference_memory())
+            free_model_memory = (get_free_memory() * 0.9 - get_inference_memory_budget())
             if (not prioritize_performance) or model_params * 4 > free_model_memory:
                 return True
 
