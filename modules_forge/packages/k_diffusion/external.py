@@ -29,7 +29,10 @@ class ForgeScheduleLinker(nn.Module):
         if n is None:
             return sampling.append_zero(self.sigmas.flip(0))
         t_max = len(self.sigmas) - 1
-        t = torch.linspace(t_max, 0, n, device=self.sigmas.device)
+        # Exclude t=0 here because append_zero() already adds terminal zero.
+        # Keeping both would produce duplicate trailing zeros and can destabilize
+        # some samplers (e.g. Euler with Automatic schedule).
+        t = torch.linspace(t_max, 0, n + 1, device=self.sigmas.device)[:-1]
         return sampling.append_zero(self.t_to_sigma(t))
 
     def sigma_to_t(self, sigma, quantize=None):
