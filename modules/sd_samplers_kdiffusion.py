@@ -91,7 +91,8 @@ def get_flux2_automatic_sigmas(num_steps: int, image_seq_len: int, device):
 
     # Equivalent to generalized_time_snr_shift(t, mu, 1.0) from BFL reference.
     t = torch.linspace(1.0, 0.0, num_steps + 1, device=device, dtype=torch.float32)
-    return (alpha * t) / (1.0 + (alpha - 1.0) * t)
+    sigmas = (alpha * t) / (1.0 + (alpha - 1.0) * t)
+    return sigmas, mu
 
 
 class CFGDenoiserKDiffusion(sd_samplers_cfg_denoiser.CFGDenoiser):
@@ -139,7 +140,10 @@ class KDiffusionSampler(sd_samplers_common.Sampler):
             # Flux2 "Automatic" should follow BFL schedule construction.
             if getattr(self.model_wrap.inner_model, "is_flux2", False):
                 image_seq_len = get_flux2_image_seq_len(p)
-                sigmas = get_flux2_automatic_sigmas(num_steps=steps, image_seq_len=image_seq_len, device=devices.cpu)
+                sigmas, mu = get_flux2_automatic_sigmas(num_steps=steps, image_seq_len=image_seq_len, device=devices.cpu)
+                sigmas_head = ", ".join(f"{x:.6f}" for x in sigmas[:3].tolist())
+                sigmas_tail = ", ".join(f"{x:.6f}" for x in sigmas[-3:].tolist())
+                print(f"[Flux2 Automatic] mu={mu:.6f} seq={image_seq_len} sigmas[:3]=[{sigmas_head}] sigmas[-3:]=[{sigmas_tail}]")
                 if not p.is_hr_pass:
                     p.extra_generation_params["Schedule type"] = "Automatic (BFL)"
                     p.extra_generation_params["Flux2 image seq len"] = image_seq_len
