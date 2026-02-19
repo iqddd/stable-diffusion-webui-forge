@@ -184,6 +184,76 @@ def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None,
 
 
 @torch.no_grad()
+def sample_euler_negative_RF(
+    model,
+    x,
+    sigmas,
+    extra_args=None,
+    callback=None,
+    disable=None,
+    s_churn=0.0,
+    s_tmin=0.0,
+    s_tmax=float("inf"),
+    s_noise=1.0,
+    noise_sampler=None,
+):
+    """Negative Euler sampler for linear Rectified Flow."""
+    extra_args = {} if extra_args is None else extra_args
+    noise_sampler = default_noise_sampler(x) if noise_sampler is None else noise_sampler
+    s_tmax = float(s_tmax) if isinstance(s_tmax, (int, float)) else 0.99
+    s_tmax = s_tmax if 0.0 < s_tmax < 1.0 else 0.99
+
+    s_in = x.new_ones([x.shape[0]])
+    n_steps = len(sigmas) - 1
+
+    for i in trange(n_steps, disable=disable):
+        t_i = sigmas[i]
+        t_next = sigmas[i + 1]
+
+        if s_tmin <= t_i <= s_tmax:
+            gamma = max(s_churn / n_steps, 2**0.5 - 1)
+        else:
+            gamma = 0.0
+
+        t_hat = t_i
+        if gamma > 0.0:
+            t_hat = t_i * (1.0 + gamma)
+            if torch.is_tensor(t_hat):
+                t_hat = t_hat.clamp(max=1.0)
+            else:
+                t_hat = min(t_hat, 1.0)
+
+            eps = noise_sampler(t_i, t_hat) * s_noise
+
+            alpha_i = 1.0 - t_i
+            alpha_hat = 1.0 - t_hat
+
+            b2 = t_hat**2 - (t_i**2) * (alpha_hat**2) / (alpha_i**2)
+            b = b2.clamp_min(0.0).sqrt()
+            a = alpha_hat / alpha_i
+
+            x = a * x - b * eps
+
+        denoised = model(x, t_hat * s_in, **extra_args)
+
+        if callback is not None:
+            callback({"x": x, "i": i, "sigma": t_i, "sigma_hat": t_hat, "denoised": denoised})
+
+        if t_hat == 0.0:
+            x = denoised
+        else:
+            d = (x - denoised) / t_hat
+            dt = t_next - t_hat
+
+            if t_next > 0 and i // 2 == 1:
+                x = -x - d * dt
+            else:
+                x = x + d * dt
+
+    return x
+
+
+@torch.no_grad()
 def sample_euler_ancestral(model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1.0, s_noise=1.0, noise_sampler=None):
     if _is_const(model.inner_model.predictor):
         return sample_euler_ancestral_RF(model, x, sigmas, extra_args, callback, disable, eta, s_noise, noise_sampler)

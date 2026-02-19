@@ -20,6 +20,7 @@ samplers_k_diffusion = [
     ("Flux Realistic" if opts.forbidden_knowledge else "DPM++ 2s a RF", "sample_dpmpp_2s_ancestral_RF", ["sample_dpmpp_2s_ancestral_RF"], {}),
     ("Euler a", "sample_euler_ancestral", ["k_euler_a", "k_euler_ancestral"], {"uses_ensd": True}),
     ("Euler", "sample_euler", ["k_euler"], {}),
+    ("Euler Negative", "sample_euler_negative_RF", ["k_euler_negative"], {}),
     ("ER SDE", "sample_er_sde", ["er_side"], {}),
     ("LCM", "sample_lcm", ["k_lcm"], {}),
     ("LMS", "sample_lms", ["k_lms"], {}),
@@ -40,6 +41,7 @@ sampler_extra_params = {
     "sample_dpmpp_3m_sde": ["eta", "s_noise"],
     "sample_euler_ancestral": ["eta", "s_noise"],
     "sample_euler": ["s_churn", "s_tmin", "s_tmax", "s_noise"],
+    "sample_euler_negative_RF": ["s_churn", "s_tmin", "s_tmax", "s_noise"],
     "sample_heun": ["s_churn", "s_tmin", "s_tmax", "s_noise"],
     "sample_dpm_2": ["s_churn", "s_tmin", "s_tmax", "s_noise"],
 }
