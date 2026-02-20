@@ -202,6 +202,9 @@ def sample_euler_negative_RF(
     noise_sampler = default_noise_sampler(x) if noise_sampler is None else noise_sampler
     s_tmax = float(s_tmax) if isinstance(s_tmax, (int, float)) else 0.99
     s_tmax = s_tmax if 0.0 < s_tmax < 1.0 else 0.99
+    churn_curve_power = extra_args.get("negative_rf_churn_curve_power", 0.2)
+    churn_curve_power = float(churn_curve_power) if isinstance(churn_curve_power, (int, float)) else 0.2
+    churn_curve_power = min(max(churn_curve_power, 0.05), 4.0)
 
     s_in = x.new_ones([x.shape[0]])
     n_steps = len(sigmas) - 1
@@ -212,6 +215,17 @@ def sample_euler_negative_RF(
 
         if s_tmin <= t_i <= s_tmax:
             gamma = max(s_churn / n_steps, 2**0.5 - 1)
+            t_i_value = float(t_i.item()) if torch.is_tensor(t_i) else float(t_i)
+            if t_i_value > 0.0:
+                # Smooth cap: weak churn near t~1, aggressive churn toward lower t.
+                blend = (1.0 - t_i_value) ** churn_curve_power
+                blend = min(max(blend, 0.0), 1.0)
+                t_hat_target = t_i_value + (1.0 - t_i_value) * blend
+                t_hat_target = min(max(t_hat_target, t_i_value), 1.0 - 1e-6)
+                gamma_cap = max(0.0, t_hat_target / t_i_value - 1.0)
+                gamma = min(gamma, gamma_cap)
+            else:
+                gamma = 0.0
         else:
             gamma = 0.0
 
