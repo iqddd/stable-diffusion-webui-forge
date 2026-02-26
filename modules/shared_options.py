@@ -537,6 +537,8 @@ options_templates.update(
         {
             "eta_ddim": OptionInfo(0.0, "Eta for DDIM", gr.Slider, {"minimum": 0.0, "maximum": 1.0, "step": 0.01}, infotext="Eta DDIM"),
             "eta_ancestral": OptionInfo(1.0, "Eta for k-diffusion samplers", gr.Slider, {"minimum": 0.0, "maximum": 1.0, "step": 0.01}, infotext="Eta"),
+            "cfgpp_low_cfg": OptionInfo(1.0, "CFG++ low CFG", gr.Slider, {"minimum": 0.0, "maximum": 30.0, "step": 0.1}).info("used as cond_scale at the end of CFG++ sampling"),
+            "cfgpp_beta": OptionInfo(0.0, "CFG++ beta", gr.Slider, {"minimum": 0.0, "maximum": 4.0, "step": 0.01}).info("0 = disabled; cond_scale(s)=low+(hi-low)*(sigma_norm**(2*beta))"),
             "ddim_discretize": OptionInfo("uniform", "img2img DDIM discretize", gr.Radio, {"choices": ("uniform", "quad")}),
             "s_churn": OptionInfo(0.0, "sigma churn", gr.Slider, {"minimum": 0.0, "maximum": 100.0, "step": 0.01}, infotext="Sigma churn"),
             "s_tmin": OptionInfo(0.0, "sigma tmin", gr.Slider, {"minimum": 0.0, "maximum": 10.0, "step": 0.01}, infotext="Sigma tmin"),

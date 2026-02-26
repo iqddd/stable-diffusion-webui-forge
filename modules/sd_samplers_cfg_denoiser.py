@@ -1,3 +1,5 @@
+import math
+
 import torch
 
 from backend.sampling.sampling_function import sampling_function
@@ -141,6 +143,28 @@ class CFGDenoiser(torch.nn.Module):
             self.p.extra_generation_params["NGMS"] = s_min_uncond
             if opts.s_min_uncond_all:
                 self.p.extra_generation_params["NGMS all steps"] = opts.s_min_uncond_all
+
+        sampler_name = getattr(getattr(self.sampler, "config", None), "name", "")
+        if sampler_name.endswith("CFG++"):
+            low_cfg = float(getattr(opts, "cfgpp_low_cfg", 1.0))
+            beta = float(getattr(opts, "cfgpp_beta", 0.0))
+            hi_cfg = float(cond_scale)
+
+            if beta > 0.0 and not math.isclose(hi_cfg, low_cfg):
+                sigma_value = float(sigma[0].item())
+                if self.step == 0 or not hasattr(self, "_cfgpp_sigma_max"):
+                    self._cfgpp_sigma_max = sigma_value
+
+                sigma_max = float(getattr(self, "_cfgpp_sigma_max", sigma_value))
+                if sigma_max > 1.0 + 1e-6:
+                    sigma_value = sigma_value / sigma_max
+
+                sigma_value = min(max(sigma_value, 0.0), 1.0)
+                cond_scale = low_cfg + (hi_cfg - low_cfg) * (sigma_value ** (2.0 * beta))
+
+                if self.step == 0:
+                    self.p.extra_generation_params["CFG++ low CFG"] = low_cfg
+                    self.p.extra_generation_params["CFG++ beta"] = beta
 
         extra_model_options = kwargs.get("model_options", {})
         denoised, cond_pred, uncond_pred = sampling_function(self, denoiser_params=denoiser_params, cond_scale=cond_scale, cond_composition=cond_composition, extra_model_options=extra_model_options)
