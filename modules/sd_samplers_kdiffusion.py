@@ -50,20 +50,6 @@ k_diffusion_samplers_map = {x.name: x for x in samplers_data_k_diffusion}
 k_diffusion_scheduler = {x.name: x.function for x in sd_schedulers.schedulers}
 
 
-def compute_flux2_empirical_mu(image_seq_len: int, num_steps: int) -> float:
-    # Reference: black-forest-labs FLUX.2 sampling schedule.
-    a1, b1 = 8.73809524e-05, 1.89833333
-    a2, b2 = 0.00016927, 0.45666666
-
-    if image_seq_len > 4300:
-        return float(a2 * image_seq_len + b2)
-
-    m_200 = a2 * image_seq_len + b2
-    m_10 = a1 * image_seq_len + b1
-
-    a = (m_200 - m_10) / 190.0
-    b = m_200 - 200.0 * a
-    return float(a * num_steps + b)
 
 
 def get_flux2_image_seq_len(p) -> int:
@@ -88,7 +74,7 @@ def get_flux2_image_seq_len(p) -> int:
 
 
 def get_flux2_automatic_sigmas(num_steps: int, image_seq_len: int, device):
-    mu = compute_flux2_empirical_mu(image_seq_len=image_seq_len, num_steps=num_steps)
+    mu = sd_schedulers.compute_flux2_empirical_mu(image_seq_len=image_seq_len, num_steps=num_steps)
     alpha = math.exp(mu)
 
     # Equivalent to generalized_time_snr_shift(t, mu, 1.0) from BFL reference.
@@ -144,20 +130,7 @@ class KDiffusionSampler(sd_samplers_common.Sampler):
         if p.sampler_noise_scheduler_override:
             sigmas = p.sampler_noise_scheduler_override(steps)
         elif scheduler is None or scheduler.function is None:
-            # Flux2 "Automatic" should follow BFL schedule construction.
-            if getattr(self.model_wrap.inner_model, "is_flux2", False):
-                image_seq_len = get_flux2_image_seq_len(p)
-                sigmas, mu = get_flux2_automatic_sigmas(num_steps=steps, image_seq_len=image_seq_len, device=devices.cpu)
-                sigmas_head = ", ".join(f"{x:.6f}" for x in sigmas[:3].tolist())
-                sigmas_tail = ", ".join(f"{x:.6f}" for x in sigmas[-3:].tolist())
-                print(f"[Flux2 Automatic] mu={mu:.6f} seq={image_seq_len} sigmas[:3]=[{sigmas_head}] sigmas[-3:]=[{sigmas_tail}]")
-                if not p.is_hr_pass:
-                    p.extra_generation_params["Schedule type"] = "Automatic (BFL)"
-                    p.extra_generation_params["Flux2 image seq len"] = image_seq_len
-                else:
-                    p.extra_generation_params["Hires schedule type"] = "Automatic (BFL)"
-            else:
-                sigmas = self.model_wrap.get_sigmas(steps)
+            sigmas = self.model_wrap.get_sigmas(steps)
         else:
             sigmas_kwargs = {"sigma_min": sigma_min, "sigma_max": sigma_max}
 

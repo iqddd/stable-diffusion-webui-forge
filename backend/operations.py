@@ -206,21 +206,35 @@ def weights_manual_cast(layer: torch.nn.Module, x: torch.Tensor, skip_weight_dty
     return weight, bias, (offload_stream, weight_a, bias_a)
 
 
-@contextlib.contextmanager
+class _MainStreamWorker:
+    def __init__(self, offload_stream: tuple[torch.Stream, torch.Tensor, torch.Tensor] | None):
+        self.offload_stream = offload_stream
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        offload_stream = self.offload_stream
+        if offload_stream is None:
+            return False
+
+        os, weight_a, bias_a = offload_stream
+        if os is None:
+            return False
+
+        if weight_a is not None:
+            device = weight_a.device
+        elif bias_a is not None:
+            device = bias_a.device
+        else:
+            return False
+
+        os.wait_stream(memory_management.current_stream(device))
+        return False
+
+
 def main_stream_worker(weight, bias, offload_stream: tuple[torch.Stream, torch.Tensor, torch.Tensor]):
-    yield
-    if offload_stream is None:
-        return
-    os, weight_a, bias_a = offload_stream
-    if os is None:
-        return
-    if weight_a is not None:
-        device = weight_a.device
-    elif bias_a is not None:
-        device = bias_a.device
-    else:
-        return
-    os.wait_stream(memory_management.current_stream(device))
+    return _MainStreamWorker(offload_stream)
 
 
 current_device: torch.device = None
@@ -944,7 +958,7 @@ def fp8_linear(self: torch.nn.Linear, input: torch.Tensor):
 
         scale_input = torch.ones((), device=input.device, dtype=torch.float32)  # TODO ?
 
-        input = torch.clamp(input, min=-448, max=448, out=input)
+        input = torch.clamp(input, min=-448, max=448)
         input = input.reshape(-1, input_shape[2]).to(dtype).contiguous()
 
         with main_stream_worker(w, bias, signal):

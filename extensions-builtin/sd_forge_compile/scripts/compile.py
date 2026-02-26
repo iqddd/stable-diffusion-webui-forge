@@ -3,6 +3,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from backend.modules.k_model import KModel
 
+import logging
+import os
+
 import gradio as gr
 import torch
 
@@ -17,9 +20,46 @@ def skip_torch_compile_dict(guard_entries):
 
 class TorchCompileForForge(scripts.Script):
     sorting_priority = 67
+    _compile_log_initialized = False
 
     def __init__(self):
         torch._dynamo.config.cache_size_limit = 256
+        self._initialize_compile_logging()
+
+    @classmethod
+    def _initialize_compile_logging(cls):
+        if cls._compile_log_initialized:
+            return
+
+        log_path = os.environ.get("FORGE_TORCH_COMPILE_LOG_PATH", "").strip()
+        if not log_path:
+            return
+
+        abs_log_path = os.path.abspath(log_path)
+        os.makedirs(os.path.dirname(abs_log_path), exist_ok=True)
+
+        file_handler = logging.FileHandler(abs_log_path, mode="a", encoding="utf-8")
+        file_handler.setFormatter(logging.Formatter("%(asctime)s %(name)s [%(levelname)s] %(message)s"))
+
+        for logger_name in ("torch._dynamo", "torch._inductor", "torch.fx.experimental.symbolic_shapes"):
+            logger = logging.getLogger(logger_name)
+            logger.setLevel(logging.INFO)
+            logger.addHandler(file_handler)
+
+        set_logs = getattr(getattr(torch, "_logging", None), "set_logs", None)
+        if callable(set_logs):
+            set_logs(
+                dynamo=logging.INFO,
+                inductor=logging.INFO,
+                dynamic=logging.INFO,
+                graph_breaks=True,
+                guards=True,
+                recompiles=True,
+                recompiles_verbose=True,
+            )
+
+        cls._compile_log_initialized = True
+        print(f'[Torch Compile Integrated] compile logs -> "{abs_log_path}"')
 
     def title(self):
         return "Torch Compile Integrated"

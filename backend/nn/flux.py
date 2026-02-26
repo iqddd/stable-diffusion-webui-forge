@@ -588,9 +588,11 @@ class IntegratedFluxTransformer2DModel(nn.Module):
         steps_w = w_len
 
         img_ids = torch.zeros((steps_h, steps_w, len(self.axes_dim)), device=x.device, dtype=torch.float32)
-        img_ids[:, :, 0] = img_ids[:, :, 1] + index
-        img_ids[:, :, 1] = img_ids[:, :, 1] + torch.linspace(h_offset, h_len - 1 + h_offset, steps=steps_h, device=x.device, dtype=torch.float32).unsqueeze(1)
-        img_ids[:, :, 2] = img_ids[:, :, 2] + torch.linspace(w_offset, w_len - 1 + w_offset, steps=steps_w, device=x.device, dtype=torch.float32).unsqueeze(0)
+        h_ids = torch.arange(steps_h, device=x.device, dtype=torch.float32) + h_offset
+        w_ids = torch.arange(steps_w, device=x.device, dtype=torch.float32) + w_offset
+        img_ids[:, :, 0] = index
+        img_ids[:, :, 1] = h_ids.unsqueeze(1)
+        img_ids[:, :, 2] = w_ids.unsqueeze(0)
         return img, repeat(img_ids, "h w c -> b (h w) c", b=bs)
 
     def forward(self, x, timestep, context, y=None, guidance=None, ref_latents=None, control=None, transformer_options={}, **kwargs):

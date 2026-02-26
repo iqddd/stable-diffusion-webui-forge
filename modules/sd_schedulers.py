@@ -232,12 +232,13 @@ def generalized_time_snr_shift(t: torch.Tensor, mu: float, sigma: float) -> floa
     return exp(mu) / (exp(mu) + (1 / t - 1) ** sigma)
 
 
-def compute_empirical_mu(image_seq_len: int, num_steps: int) -> float:
+def compute_flux2_empirical_mu(image_seq_len: int, num_steps: int) -> float:
     a1, b1 = 8.73809524e-05, 1.89833333
     a2, b2 = 0.00016927, 0.45666666
 
     if image_seq_len > 4300:
-        mu = a2 * image_seq_len + b2
+        # mu = a2 * image_seq_len + b2
+        mu = 2.02
         return float(mu)
 
     m_200 = a2 * image_seq_len + b2
@@ -251,7 +252,7 @@ def compute_empirical_mu(image_seq_len: int, num_steps: int) -> float:
 
 
 def get_schedule(num_steps: int, image_seq_len: int) -> list[float]:
-    mu = compute_empirical_mu(image_seq_len, num_steps)
+    mu = compute_flux2_empirical_mu(image_seq_len=image_seq_len, num_steps=num_steps)
     timesteps = torch.linspace(1, 0, num_steps + 1)
     timesteps = generalized_time_snr_shift(timesteps, mu, 1.0)
     return timesteps

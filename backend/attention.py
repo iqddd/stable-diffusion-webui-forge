@@ -20,6 +20,9 @@ if memory_management.xformers_enabled() or memory_management.xformers_enabled_va
     import xformers.ops
 
 
+sage_attn_hnd = None
+sage_attn_nhd = None
+
 if memory_management.sage_enabled():
     import importlib.metadata
 
@@ -43,6 +46,30 @@ if memory_management.sage_enabled():
                 sageattn = partial(_function, quantization_backend=args.sage_quantization_backend.value)
             else:
                 sageattn = partial(_function, qk_quant_gran=args.sage_quant_gran.value, pv_accum_dtype=args.sage_accum_dtype.value)
+
+    sage_attn_hnd = None
+    sage_attn_nhd = None
+    try:
+        # Keep SageAttention as a custom op for torch.compile to avoid tracing third-party Python internals.
+        @torch.library.custom_op("sage_attention::sage_attn_hnd", mutates_args=())
+        def sage_attn_hnd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+            return sageattn(q, k, v, tensor_layout="HND", is_causal=False)
+
+        @sage_attn_hnd.register_fake
+        def sage_attn_hnd_fake(q, k, v):
+            return q.new_empty(q.shape)
+
+        @torch.library.custom_op("sage_attention::sage_attn_nhd", mutates_args=())
+        def sage_attn_nhd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+            return sageattn(q, k, v, tensor_layout="NHD", is_causal=False)
+
+        @sage_attn_nhd.register_fake
+        def sage_attn_nhd_fake(q, k, v):
+            return q.new_empty(q.shape)
+    except Exception:
+        # Fall back to direct SageAttention call path when custom op registration is unavailable.
+        sage_attn_hnd = None
+        sage_attn_nhd = None
 
 
 if memory_management.flash_enabled():
@@ -243,7 +270,12 @@ def attention_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=
 
     try:
         if not _fallback:
-            out = sageattn(q, k, v, attn_mask=mask, is_causal=False, tensor_layout=tensor_layout)
+            if mask is None and tensor_layout == "HND" and sage_attn_hnd is not None:
+                out = sage_attn_hnd(q, k, v)
+            elif mask is None and tensor_layout == "NHD" and sage_attn_nhd is not None:
+                out = sage_attn_nhd(q, k, v)
+            else:
+                out = sageattn(q, k, v, attn_mask=mask, is_causal=False, tensor_layout=tensor_layout)
     except Exception as e:
         logger.error(f"Error running sageattn: {e}")
         _fallback = True
