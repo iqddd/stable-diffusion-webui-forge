@@ -163,6 +163,7 @@ class ImageStitch(scripts.Script):
 
         references = self.extract_images(references)
 
+        # Cache depends on the active model, references, and Wan's txt2img-specific path.
         cache: list[str | int | bool] = [
             str(sd_models.model_data.forge_loading_parameters),
             *(self.hash_image(ref) for ref in references),
