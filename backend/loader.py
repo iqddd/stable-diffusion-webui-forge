@@ -674,6 +674,7 @@ def process_anima(dit: dict[str, torch.Tensor], enc: dict[str, torch.Tensor]):
 def split_state_dict(sd, additional_state_dicts: list = None):
     import huggingface_guess
 
+    original_sd = sd
     sd, metadata = load_torch_file(sd, return_metadata=True)
     sd, metadata = convert_quantization(sd, metadata)
     sd = preprocess_state_dict(sd)
@@ -702,6 +703,8 @@ def split_state_dict(sd, additional_state_dicts: list = None):
     guess.clip_target = guess.clip_target(sd)
     guess.model_type = guess.model_type(sd)
     guess.ztsnr = "ztsnr" in sd
+    if "xl" in guess.huggingface_repo and "rectified" in str(original_sd).lower():
+        guess.sampling_settings["RF"] = True
 
     sd = guess.process_vae_state_dict(sd)
 
@@ -733,6 +736,11 @@ def forge_loader(sd: os.PathLike, additional_state_dicts: list[os.PathLike] = No
         raise ValueError("Failed to recognize model...") from None
 
     repo_name = estimated_config.huggingface_repo
+<<<<<<< HEAD
+=======
+    if "xl" in repo_name and "rectified" in str(sd).lower():
+        estimated_config.sampling_settings["RF"] = True
+>>>>>>> ff81e1ef (sdxl rf)
 
     backend.args.dynamic_args["kontext"] = "kontext" in str(sd).lower()
     backend.args.dynamic_args["edit"] = "qwen" in str(sd).lower() and "edit" in str(sd).lower()
