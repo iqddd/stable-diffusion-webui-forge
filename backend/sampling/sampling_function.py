@@ -403,8 +403,6 @@ def sampling_prepare(unet: "UnetPatcher", x: torch.Tensor):
     for cnet in unet.list_controlnets():
         cnet.pre_run(real_model, percent_to_timestep_function)
 
-    return
-
 
 def sampling_cleanup(unet: "UnetPatcher"):
     if unet.has_online_lora():
