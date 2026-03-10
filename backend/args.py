@@ -139,6 +139,7 @@ sage2.add_argument("--sage-accum-dtype", type=Sage_pv_accum_dtype, default=Sage_
 
 args, _ = parser.parse_known_args()
 
+from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import os
 

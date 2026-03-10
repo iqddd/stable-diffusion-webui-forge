@@ -132,7 +132,14 @@ class Wan(ForgeDiffusionEngine):
             mask = mask.repeat(1, 4, 1, 1, 1)
         mask = resize_to_batch_size(mask, latent_shape[0])
 
-        dynamic_args["concat_latent"] = torch.cat((mask, image), dim=1).cpu()
+        _concat_mask_index = 0  # TODO
+
+        if _concat_mask_index != 0:
+            z = torch.cat((image[:, :_concat_mask_index], mask, image[:, _concat_mask_index:]), dim=1)
+        else:
+            z = torch.cat((mask, image), dim=1)
+
+        dynamic_args.concat_latent = z.cpu()
         self.start_image = None
 
     @torch.inference_mode()
@@ -142,7 +149,7 @@ class Wan(ForgeDiffusionEngine):
             x = x[0].unsqueeze(0)  # enforce batch_size of 1
         x = x.mul(0.5).add(0.5)
 
-        if dynamic_args["is_referencing"]:
+        if dynamic_args.is_referencing:
             self.end_image = x.cpu()
             if b == 1:
                 return None

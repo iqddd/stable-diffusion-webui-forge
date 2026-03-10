@@ -39,7 +39,7 @@ class StableDiffusionXL(ForgeDiffusionEngine):
         self.text_processing_engine_l = ClassicTextProcessingEngine(
             text_encoder=clip.cond_stage_model.clip_l,
             tokenizer=clip.tokenizer.clip_l,
-            embedding_dir=dynamic_args["embedding_dir"],
+            embedding_dir=dynamic_args.embedding_dir,
             embedding_key="clip_l",
             embedding_expected_shape=2048,
             text_projection=False,
@@ -52,7 +52,7 @@ class StableDiffusionXL(ForgeDiffusionEngine):
         self.text_processing_engine_g = ClassicTextProcessingEngine(
             text_encoder=clip.cond_stage_model.clip_g,
             tokenizer=clip.tokenizer.clip_g,
-            embedding_dir=dynamic_args["embedding_dir"],
+            embedding_dir=dynamic_args.embedding_dir,
             embedding_key="clip_g",
             embedding_expected_shape=2048,
             text_projection=True,
@@ -162,7 +162,7 @@ class StableDiffusionXLRefiner(ForgeDiffusionEngine):
         self.text_processing_engine_g = ClassicTextProcessingEngine(
             text_encoder=clip.cond_stage_model.clip_g,
             tokenizer=clip.tokenizer.clip_g,
-            embedding_dir=dynamic_args["embedding_dir"],
+            embedding_dir=dynamic_args.embedding_dir,
             embedding_key="clip_g",
             embedding_expected_shape=2048,
             text_projection=True,

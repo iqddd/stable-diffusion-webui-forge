@@ -153,7 +153,7 @@ class ImageStitch(scripts.Script):
         p.sd_model.clear_references()
 
     def process(self, p: StableDiffusionProcessing, enable: bool, references: list[str | tuple[Image.Image, str]], max_dim: int):
-        if not (enable and references and any(dynamic_args[key] for key in ("kontext", "edit", "klein", "wan"))):
+        if not (enable and references and any(getattr(dynamic_args, key) for key in ("kontext", "edit", "klein", "wan"))):
             if ImageStitch.cached_parameters is None:
                 return
 
@@ -167,7 +167,7 @@ class ImageStitch(scripts.Script):
         cache: list[str | int | bool] = [
             str(sd_models.model_data.forge_loading_parameters),
             *(self.hash_image(ref) for ref in references),
-            dynamic_args["wan"] and isinstance(p, StableDiffusionProcessingTxt2Img),
+            dynamic_args.wan and isinstance(p, StableDiffusionProcessingTxt2Img),
         ]
         if ImageStitch.cached_parameters == cache:
             return
@@ -176,7 +176,7 @@ class ImageStitch(scripts.Script):
         self.reset_references(p)
 
         batch_size = None
-        if dynamic_args["wan"]:
+        if dynamic_args.wan:
             if isinstance(p, StableDiffusionProcessingTxt2Img):
                 batch_size = p.batch_size
                 if batch_size == 1:
@@ -186,7 +186,7 @@ class ImageStitch(scripts.Script):
                 logger.warning("Wan 2.2 only uses the first reference image...")
                 references = [references[0]]
 
-        dynamic_args["is_referencing"] = True
+        dynamic_args.is_referencing = True
 
         for reference in references:
             reference = self.preprocess(reference, max_dim)
@@ -204,7 +204,7 @@ class ImageStitch(scripts.Script):
 
             images_tensor_to_samples(image, 0, p.sd_model)  # calls encode_first_stage
 
-        dynamic_args["is_referencing"] = False
+        dynamic_args.is_referencing = False
 
     @staticmethod
     def extract_images(gallery: list[str | tuple[Image.Image, str]]) -> list[Image.Image]:
