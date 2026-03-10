@@ -150,8 +150,8 @@ class _DynamicArgsMeta(type):
     def get(cls, key, default=None):
         return getattr(cls, key, default)
 
-    def __getitem__(cls, key):
-        return getattr(cls, key)
+    def __getitem__(cls, key, default=None):
+        return getattr(cls, key, default)
 
     def __setitem__(cls, key, value):
         setattr(cls, key, value)
