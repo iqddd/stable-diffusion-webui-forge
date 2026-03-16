@@ -816,6 +816,7 @@ class ForgeOperationsGGUF(ForgeOperations):
                 return torch.nn.functional.embedding(x, weight, self.padding_idx, self.max_norm, self.norm_type, self.scale_grad_by_freq, self.sparse)
 
 
+<<<<<<< HEAD
 # region Tiled
 
 
@@ -943,13 +944,22 @@ def _fp8_prepare_online_lora(linear: torch.nn.Linear, x: torch.Tensor):
     linear._forge_fp8_lora_A = lora_a
     linear._forge_fp8_lora_B = lora_b
     return lora_a, lora_b, True
+=======
+# region fp8
+
+
+from backend.operations_mixed_precision import (
+    QuantizedTensor,
+    TensorCoreFP8Layout,
+    mixed_precision_ops,
+)
+>>>>>>> 4b5b4cd9 (fp8)
 
 
 def fp8_linear(self: torch.nn.Linear, input: torch.Tensor):
     # https://github.com/Comfy-Org/ComfyUI/blob/v0.16.4/comfy/ops.py#L615
     if QuantizedTensor is None or TensorCoreFP8Layout is None:
         return None
-
     dtype = self.weight.dtype
     if dtype is not torch.float8_e4m3fn:
         return None
@@ -990,7 +1000,6 @@ def fp8_linear(self: torch.nn.Linear, input: torch.Tensor):
         lora_x = torch.nn.functional.linear(lora_input.to(lora_a.dtype), lora_a)
         lora_y = torch.nn.functional.linear(lora_x, lora_b)
         o = o + lora_y.to(o.dtype)
-
     if tensor_3d:
         o = o.reshape((input_shape[0], input_shape[1], w.shape[0]))
 
