@@ -1078,7 +1078,7 @@ def using_forge_operations(operations=None, device=None, dtype=None, manual_cast
         if bnb_dtype in ["gguf"]:
             operations = ForgeOperationsGGUF
         elif bnb_dtype in ["nf4", "fp4"]:
-            assert memory_management.bnb_enabled()
+            assert memory_management.bnb_enabled(), 'Install the "bitsandbytes" package with --bnb'
             operations = ForgeOperationsBNB4bits
         elif bnb_dtype in ["vae"] and args.tiled_conv2d:
             memory_management.logger.info(f"Using TiledOperations ({args.tiled_conv2d}) for VAE")
