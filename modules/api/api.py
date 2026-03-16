@@ -766,16 +766,16 @@ class Api:
             import torch
 
             if torch.cuda.is_available():
-                backend = torch.cuda
+                _backend = torch.cuda
             elif torch.xpu.is_available():
-                backend = torch.xpu
+                _backend = torch.xpu
             else:
-                backend = None
+                _backend = None
 
-            if backend is not None:
-                s = backend.mem_get_info()
+            if _backend is not None:
+                s = _backend.mem_get_info()
                 system = {"free": s[0], "used": s[1] - s[0], "total": s[1]}
-                s = dict(backend.memory_stats(shared.device))
+                s = dict(_backend.memory_stats(shared.device))
                 allocated = {"current": s["allocated_bytes.all.current"], "peak": s["allocated_bytes.all.peak"]}
                 reserved = {"current": s["reserved_bytes.all.current"], "peak": s["reserved_bytes.all.peak"]}
                 active = {"current": s.get("active_bytes.all.current") or s.get("active.all.current") or 0, "peak": s.get("active_bytes.all.peak") or s.get("active.all.peak") or 0}
