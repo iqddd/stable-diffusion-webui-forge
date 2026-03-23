@@ -176,6 +176,9 @@ def model_lora_keys_clip(model, key_map={}):
 
 def model_lora_keys_unet(model, key_map={}):
     def resolve_target_key(target_key, state_dict_keys):
+        if isinstance(target_key, tuple):
+            resolved_base = resolve_target_key(target_key[0], state_dict_keys)
+            return (resolved_base, *target_key[1:])
         if target_key in state_dict_keys:
             return target_key
         if target_key.endswith(".scale"):
