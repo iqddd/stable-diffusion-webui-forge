@@ -131,7 +131,11 @@ def detect_unet_config(state_dict: dict, key_prefix: str):
         dit_config["guidance_embed"] = True
         return dit_config
 
-    if "{}double_blocks.0.img_attn.norm.key_norm.scale".format(key_prefix) in state_dict_keys and ("{}img_in.weight".format(key_prefix) in state_dict_keys or f"{key_prefix}distilled_guidance_layer.norms.0.scale" in state_dict_keys):  # Flux.1 / Flux.2
+    flux_qk_norm_keys = (
+        "{}double_blocks.0.img_attn.norm.key_norm.scale".format(key_prefix),
+        "{}double_blocks.0.img_attn.norm.key_norm.weight".format(key_prefix),
+    )
+    if any(k in state_dict_keys for k in flux_qk_norm_keys) and ("{}img_in.weight".format(key_prefix) in state_dict_keys or f"{key_prefix}distilled_guidance_layer.norms.0.scale" in state_dict_keys):  # Flux.1 / Flux.2
         dit_config = {}
         if "{}double_stream_modulation_img.lin.weight".format(key_prefix) in state_dict_keys:
             dit_config["image_model"] = "flux2"
@@ -197,7 +201,10 @@ def detect_unet_config(state_dict: dict, key_prefix: str):
         else:
             dit_config["guidance_embed"] = "{}guidance_in.in_layer.weight".format(key_prefix) in state_dict_keys
             dit_config["yak_mlp"] = "{}double_blocks.0.img_mlp.gate_proj.weight".format(key_prefix) in state_dict_keys
-            dit_config["txt_norm"] = "{}txt_norm.scale".format(key_prefix) in state_dict_keys
+            dit_config["txt_norm"] = (
+                "{}txt_norm.scale".format(key_prefix) in state_dict_keys
+                or "{}txt_norm.weight".format(key_prefix) in state_dict_keys
+            )
 
         return dit_config
 

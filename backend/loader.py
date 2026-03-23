@@ -418,7 +418,10 @@ def replace_state_dict(sd: dict[str, torch.Tensor], asd: dict[str, torch.Tensor]
             sd[vae_key_prefix + k] = v
 
     ##  identify model type
-    flux_test_key = "model.diffusion_model.double_blocks.0.img_attn.norm.key_norm.scale"
+    flux_test_keys = (
+        "model.diffusion_model.double_blocks.0.img_attn.norm.key_norm.scale",
+        "model.diffusion_model.double_blocks.0.img_attn.norm.key_norm.weight",
+    )
     svdq_test_key = "model.diffusion_model.single_transformer_blocks.0.mlp_fc1.qweight"
     legacy_test_key = "model.diffusion_model.input_blocks.4.1.transformer_blocks.0.attn2.to_k.weight"
 
@@ -431,7 +434,7 @@ def replace_state_dict(sd: dict[str, torch.Tensor], asd: dict[str, torch.Tensor]
                 model_type = "xlrf"  # sdxl refiner model
             case 2048:
                 model_type = "sdxl"
-    elif flux_test_key in sd or svdq_test_key in sd:
+    elif any(k in sd for k in flux_test_keys) or svdq_test_key in sd:
         model_type = "flux"
 
     ##  prefixes used by various model types for CLIP-L
