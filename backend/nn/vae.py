@@ -364,9 +364,11 @@ class AutoencoderKLFlux2(IntegratedAutoencoderKL):
             eps=self.bn_eps,
         )
 
+        z = self.postprocess_encode(z)
         return z
 
     def decode(self, z):
+        z = self.preprocess_decode(z)
         s = torch.sqrt(memory_management.cast_to(self.bn.running_var.view(1, -1, 1, 1), dtype=z.dtype, device=z.device) + self.bn_eps)
         m = memory_management.cast_to(self.bn.running_mean.view(1, -1, 1, 1), dtype=z.dtype, device=z.device)
         z = z * s + m
@@ -390,7 +392,7 @@ class AutoencoderKLFlux2(IntegratedAutoencoderKL):
             if h % scale_factor != 0 or w % scale_factor != 0:
                 pad_h = (scale_factor - (h % scale_factor)) % scale_factor
                 pad_w = (scale_factor - (w % scale_factor)) % scale_factor
-                latent = F.pad(latent, (0, pad_w, 0, pad_h))
+                latent = torch.nn.functional.pad(latent, (0, pad_w, 0, pad_h))
                 h = latent.shape[-2]
                 w = latent.shape[-1]
             latent = latent.reshape(latent.shape[0], packed_channels, h // scale_factor, scale_factor, w // scale_factor, scale_factor)
