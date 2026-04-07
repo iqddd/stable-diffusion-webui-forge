@@ -259,10 +259,10 @@ def sample_euler_negative_RF(
             d = (x - denoised) / t_hat
             dt = t_next - t_hat
 
-            if t_next > 0 and i // 2 == 1:
-                x = -x - d * dt
-            else:
-                x = x + d * dt
+            # if t_next > 0 and i // 2 == 1:
+            #     x = -x - d * dt
+            # else:
+            x = x + d * dt
 
     return x
 
