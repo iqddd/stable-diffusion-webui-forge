@@ -682,7 +682,8 @@ def _load_unet(path: os.PathLike):
     import huggingface_guess
 
     sd, metadata = load_torch_file(path, return_metadata=True)
-    sd, metadata = convert_quantization(sd, metadata)
+    _prefix = huggingface_guess.unet_prefix_from_state_dict(sd)
+    sd, metadata = convert_quantization(sd, metadata, _prefix)
     sd = preprocess_state_dict(sd)
     guess = huggingface_guess.guess(sd)
 
@@ -693,7 +694,8 @@ def _load_diffuser(path: os.PathLike):
     import huggingface_guess
 
     sd, metadata = load_torch_file(path, return_metadata=True)
-    sd, metadata = convert_quantization(sd, metadata)
+    _prefix = huggingface_guess.unet_prefix_from_state_dict(sd)
+    sd, metadata = convert_quantization(sd, metadata, _prefix)
     sd = convert_diffusers_mmdit(sd, "")
     sd = preprocess_state_dict(sd)
     guess = huggingface_guess.guess(sd)
