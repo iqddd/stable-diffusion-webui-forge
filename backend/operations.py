@@ -859,7 +859,6 @@ class ForgeOperationsGGUF(ForgeOperations):
                 return torch.nn.functional.embedding(x, weight, self.padding_idx, self.max_norm, self.norm_type, self.scale_grad_by_freq, self.sparse)
 
 
-<<<<<<< HEAD
 # region Tiled
 
 
@@ -987,16 +986,6 @@ def _fp8_prepare_online_lora(linear: torch.nn.Linear, x: torch.Tensor):
     linear._forge_fp8_lora_A = lora_a
     linear._forge_fp8_lora_B = lora_b
     return lora_a, lora_b, True
-=======
-# region fp8
-
-
-from backend.operations_mixed_precision import (
-    QuantizedTensor,
-    TensorCoreFP8Layout,
-    mixed_precision_ops,
-)
->>>>>>> 4b5b4cd9 (fp8)
 
 
 def fp8_linear(self: torch.nn.Linear, input: torch.Tensor):
@@ -1059,6 +1048,56 @@ class ForgeOperationsFP8(ForgeOperations):
                 memory_management.logger.error(f"Error during fp8_fast: {e}")
 
             return super().forward(x)
+
+
+# region Tiled
+
+
+class TiledOperations(ForgeOperations):
+    class Conv2d(ForgeOperations.Conv2d):
+        tile_size: int
+
+        def __init__(self, *arg, **kwargs):
+            super().__init__(*arg, **kwargs)
+            self._3x1x1: bool = self.kernel_size == (3, 3) and self.stride == (1, 1) and self.padding == (1, 1)
+            self.tile_size = args.tiled_conv2d
+
+        @torch.inference_mode()
+        def forward(self, x: torch.Tensor):
+            if not self._3x1x1:
+                return super().forward(x)
+
+            B, C, H, W = x.shape
+
+            if H <= self.tile_size and W <= self.tile_size:
+                return super().forward(x)
+
+            orig_forward = super().forward
+            out_channels = self.out_channels if self.out_channels is not None else C
+
+            out = torch.empty((B, out_channels, H, W), device=x.device, dtype=x.dtype, memory_format=torch.contiguous_format)
+            non_blocking = memory_management.device_supports_non_blocking(x.device)
+
+            for i in range(0, H, self.tile_size):
+                i0 = max(i - 1, 0)
+                i1 = min(i + self.tile_size + 1, H)
+                pi = i - i0
+                ph = min(self.tile_size, H - i)
+
+                for j in range(0, W, self.tile_size):
+                    j0 = max(j - 1, 0)
+                    j1 = min(j + self.tile_size + 1, W)
+
+                    tile = x[:, :, i0:i1, j0:j1]
+                    tile_conv = orig_forward(tile)
+
+                    pj = j - j0
+                    pw = min(self.tile_size, W - j)
+
+                    out[:, :, i : i + ph, j : j + pw].copy_(tile_conv[:, :, pi : pi + ph, pj : pj + pw], non_blocking=non_blocking)
+                    del tile_conv
+
+            return out
 
 
 # region Pick OPs
