@@ -352,8 +352,6 @@ def forge_model_reload():
     state_dict = checkpoint_info.filename
     additional_state_dicts = model_data.forge_loading_parameters.get("additional_modules", [])
 
-    timer.record("cache state dict")
-
     dynamic_args.forge_unet_storage_dtype = model_data.forge_loading_parameters.get("unet_storage_dtype", None)
     dynamic_args.embedding_dir = cmd_opts.embeddings_dir
     try:
