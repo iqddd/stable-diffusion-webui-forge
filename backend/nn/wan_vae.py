@@ -418,9 +418,3 @@ class WanVAE(nn.Module, ProcessLatent, ConfigMixin):
                 out_ = self.decoder(x[:, :, 1 + 2 * (i - 1) : 1 + 2 * i, :, :], feat_cache=feat_map, feat_idx=conv_idx)
                 out += out_
         return torch.cat(out, 2)
-
-    def process_in(self, latent):
-        return self.latent_format.process_in(latent)
-
-    def process_out(self, latent):
-        return self.latent_format.process_out(latent)
