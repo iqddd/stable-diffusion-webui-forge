@@ -320,7 +320,7 @@ class AutoencoderKLFlux2(IntegratedAutoencoderKL):
     config_name = "config.json"
 
     @register_to_config
-    def __init__(self, in_channels=3, out_channels=3, block_out_channels=(64,), layers_per_block=1, latent_channels=4, use_quant_conv=True, use_post_quant_conv=True, *, ech: int = None, dch: int = None, **kwargs):
+    def __init__(self, in_channels=3, out_channels=3, block_out_channels=(64,), layers_per_block=1, latent_channels=4, use_quant_conv=True, use_post_quant_conv=True, *, mugen: bool = False, ech: int = None, dch: int = None, **kwargs):
         del kwargs
         super().__init__()
 
@@ -343,6 +343,8 @@ class AutoencoderKLFlux2(IntegratedAutoencoderKL):
             track_running_stats=True,
         )
         self.bn.eval()
+
+        self.mugen = mugen  # 32 <-> 128
 
     def encode(self, x):
         z = super().encode(x)
@@ -377,8 +379,33 @@ class AutoencoderKLFlux2(IntegratedAutoencoderKL):
 
         return super().decode(z)
 
-    def process_in(self, latent):
+    def preprocess_decode(self, latent: torch.Tensor):
+        packed_channels: int = latent.size(1)
+        latent_channels: int = 128
+        scale_factor: int = 2
+
+        if self.mugen:
+            h = latent.shape[-2]
+            w = latent.shape[-1]
+            if h % scale_factor != 0 or w % scale_factor != 0:
+                pad_h = (scale_factor - (h % scale_factor)) % scale_factor
+                pad_w = (scale_factor - (w % scale_factor)) % scale_factor
+                latent = F.pad(latent, (0, pad_w, 0, pad_h))
+                h = latent.shape[-2]
+                w = latent.shape[-1]
+            latent = latent.reshape(latent.shape[0], packed_channels, h // scale_factor, scale_factor, w // scale_factor, scale_factor)
+            latent = latent.permute(0, 1, 3, 5, 2, 4).reshape(latent.shape[0], latent_channels, h // scale_factor, w // scale_factor)
+
         return latent
 
-    def process_out(self, latent):
+    def postprocess_encode(self, latent: torch.Tensor):
+        packed_channels: int = 32
+        scale_factor: int = 2
+
+        if self.mugen:
+            h = latent.shape[-2]
+            w = latent.shape[-1]
+            latent = latent.reshape(latent.shape[0], packed_channels, scale_factor, scale_factor, h, w)
+            latent = latent.permute(0, 1, 4, 2, 5, 3).reshape(latent.shape[0], packed_channels, h * scale_factor, w * scale_factor)
+
         return latent
