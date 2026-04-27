@@ -9,6 +9,7 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from einops import rearrange
 
 from backend.attention import attention_function_vae
+from backend.nn._vae import ProcessLatent
 from backend.operations import ForgeOperations as ops
 
 CACHE_T = 2
@@ -379,7 +380,7 @@ def count_conv3d(model):
     return count
 
 
-class WanVAE(nn.Module, ConfigMixin):
+class WanVAE(nn.Module, ProcessLatent, ConfigMixin):
     config_name = "config.json"
 
     @register_to_config
@@ -398,8 +399,6 @@ class WanVAE(nn.Module, ConfigMixin):
         self.conv1 = CausalConv3d(z_dim * 2, z_dim * 2, 1)
         self.conv2 = CausalConv3d(z_dim, z_dim, 1)
         self.decoder = Decoder3d(base_dim, z_dim, image_channels, dim_mult, num_res_blocks, attn_scales, self.temporal_upsample, dropout)
-
-        self.latent_format = None
 
     def encode(self, x):
         conv_idx = [0]
@@ -433,9 +432,3 @@ class WanVAE(nn.Module, ConfigMixin):
                 out_ = self.decoder(x[:, :, i : i + 1, :, :], feat_cache=feat_map, feat_idx=conv_idx)
                 out = torch.cat([out, out_], 2)
         return out
-
-    def process_in(self, latent):
-        return self.latent_format.process_in(latent)
-
-    def process_out(self, latent):
-        return self.latent_format.process_out(latent)
