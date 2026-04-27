@@ -1,3 +1,4 @@
+from abc import abstractmethod
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -48,12 +49,15 @@ class ForgeDiffusionEngine:
     def get_first_stage_encoding(self, x):
         return x
 
+    @abstractmethod
     def get_learned_conditioning(self, prompt: list[str]):
         raise NotImplementedError
 
+    @abstractmethod
     def encode_first_stage(self, x):
         raise NotImplementedError
 
+    @abstractmethod
     def decode_first_stage(self, x):
         raise NotImplementedError
 
