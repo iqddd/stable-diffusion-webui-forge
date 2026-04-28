@@ -738,14 +738,15 @@ def forge_loader(sd: os.PathLike, additional_state_dicts: list[os.PathLike] = No
         raise ValueError("Failed to recognize model...") from None
 
     repo_name = estimated_config.huggingface_repo
-    if "xl" in repo_name and "rectified" in str(sd).lower():
-        estimated_config.sampling_settings["RF"] = True
 
     backend.args.dynamic_args["kontext"] = "kontext" in str(sd).lower()
     backend.args.dynamic_args["edit"] = "qwen" in str(sd).lower() and "edit" in str(sd).lower()
     backend.args.dynamic_args["nunchaku"] = getattr(estimated_config, "nunchaku", False)
     backend.args.dynamic_args["klein"] = "klein" in repo_name
     backend.args.dynamic_args["wan"] = "Wan" in repo_name
+
+    if "xl" in repo_name and "rectified" in str(sd).lower():
+        estimated_config.sampling_settings["RF"] = True
 
     if "xl" in repo_name and "rectified" in str(sd).lower():
         estimated_config.sampling_settings["RF"] = True
