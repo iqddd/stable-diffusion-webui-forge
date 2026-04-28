@@ -806,18 +806,19 @@ def split_state_dict(path: os.PathLike, additional_state_dicts: list[os.PathLike
 def forge_loader(sd: os.PathLike, additional_state_dicts: list[os.PathLike] = None) -> "ForgeDiffusionEngine":
     try:
         state_dicts, estimated_config = split_state_dict(sd, additional_state_dicts=additional_state_dicts)
-    except Exception:
-        raise ValueError("Failed to recognize model type!") from None
+    except AttributeError:
+        raise ValueError("Failed to recognize model...") from None
 
     repo_name = estimated_config.huggingface_repo
-    if "xl" in repo_name and "rectified" in str(sd).lower():
-        estimated_config.sampling_settings["RF"] = True
 
     backend.args.dynamic_args.kontext = "kontext" in str(sd).lower()
     backend.args.dynamic_args.edit = "qwen" in str(sd).lower() and "edit" in str(sd).lower()
     backend.args.dynamic_args.nunchaku = getattr(estimated_config, "nunchaku", False)
     backend.args.dynamic_args.klein = "klein" in repo_name
     backend.args.dynamic_args.wan = "Wan" in repo_name
+
+    if "xl" in repo_name and "rectified" in str(sd).lower():
+        estimated_config.sampling_settings["RF"] = True
 
     if getattr(estimated_config, "nunchaku", False):
         estimated_config.unet_config["filename"] = str(sd)

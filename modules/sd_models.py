@@ -369,6 +369,8 @@ def forge_model_reload():
         memory_management.soft_empty_cache()
 
     sd_model.extra_generation_params = {}
+    sd_model.extra_generation_params = {}
+>>>>>>> 33d5da90 (loader)
     sd_model.comments = []
     sd_model.sd_checkpoint_info = checkpoint_info
     sd_model.filename = checkpoint_info.filename
