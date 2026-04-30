@@ -52,7 +52,9 @@ class Wan(ForgeDiffusionEngine):
         del self.ref_latents
 
         self.start_image: torch.Tensor = None
+        """first frame; cleared automatically every generation"""
         self.end_image: torch.Tensor = None
+        """last frame; cleared manually by ImageStitch"""
 
     def set_shift(self, shift):
         global refiner_shift
@@ -114,7 +116,6 @@ class Wan(ForgeDiffusionEngine):
 
         extra_channels = 20
         latent_dim = 16
-
         for i in range(0, image.shape[1], latent_dim):
             image[:, i : i + latent_dim] = self.forge_objects.vae.first_stage_model.process_in(image[:, i : i + latent_dim])
         image = resize_to_batch_size(image, latent_shape[0])
@@ -132,12 +133,7 @@ class Wan(ForgeDiffusionEngine):
             mask = mask.repeat(1, 4, 1, 1, 1)
         mask = resize_to_batch_size(mask, latent_shape[0])
 
-        _concat_mask_index = 0  # TODO
-
-        if _concat_mask_index != 0:
-            z = torch.cat((image[:, :_concat_mask_index], mask, image[:, _concat_mask_index:]), dim=1)
-        else:
-            z = torch.cat((mask, image), dim=1)
+        z = torch.cat((mask, image), dim=1)
 
         dynamic_args.concat_latent = z.cpu()
         self.start_image = None
