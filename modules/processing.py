@@ -7,7 +7,10 @@ import math
 import os
 import random
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from backend.diffusion_engine.base import ForgeDiffusionEngine
 
 import cv2
 import numpy as np
@@ -117,7 +120,7 @@ def txt2img_image_conditioning(sd_model, x, width, height):
 
 @dataclass(repr=False)
 class StableDiffusionProcessing:
-    sd_model: object = None
+    sd_model: "ForgeDiffusionEngine" = None
     outpath_samples: str = None
     outpath_grids: str = None
     prompt: str = ""
@@ -255,11 +258,11 @@ class StableDiffusionProcessing:
         self.s_noise = self.s_noise if self.s_noise is not None else opts.s_noise
 
     @property
-    def sd_model(self):  # noqa: F811
+    def sd_model(self) -> "ForgeDiffusionEngine":
         return shared.sd_model
 
     @sd_model.setter
-    def sd_model(self, value):
+    def sd_model(self, _):
         pass
 
     @property
