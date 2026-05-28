@@ -6,6 +6,7 @@ if TYPE_CHECKING:
     from backend.patcher.clip import CLIP
     from backend.patcher.unet import UnetPatcher
     from backend.patcher.vae import VAE
+    from modules_forge.packages.huggingface_guess.model_list import BASE
 
 from backend import memory_management, utils
 
@@ -24,9 +25,11 @@ class ForgeObjects:
 class ForgeDiffusionEngine:
     matched_guesses = []
 
-    def __init__(self, estimated_config, huggingface_components):
-        self.model_config = estimated_config
-        self.is_inpaint = estimated_config.inpaint_model()
+    def __init__(self, estimated_config: "BASE", huggingface_components: dict[str, "torch.nn.Module"]):
+        huggingface_components["vae"].latent_format = estimated_config.latent_format
+
+        self.model_config: "BASE" = estimated_config
+        self.is_inpaint: bool = estimated_config.inpaint_model()
 
         self.forge_objects: "ForgeObjects" = None
         self.forge_objects_original: "ForgeObjects" = None
