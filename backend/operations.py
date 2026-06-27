@@ -865,6 +865,73 @@ else:
     mixed_precision_ops = None
 
 
+def _fp8_prepare_online_lora(linear: torch.nn.Linear, x: torch.Tensor):
+    loras: dict[str, list[torch.Tensor]] = getattr(linear, "forge_online_loras", {})
+    if not loras:
+        return None, None, True
+
+    weight_patches = loras.get("weight", None)
+    bias_patches = loras.get("bias", None)
+
+    # bias patches and non-LoRA adapters are not supported by the fast low-rank path
+    if bias_patches:
+        return None, None, False
+
+    if not weight_patches:
+        return None, None, True
+
+    cache_key = (id(weight_patches), x.device, x.dtype)
+    if getattr(linear, "_forge_fp8_lora_cache_key", None) == cache_key:
+        return linear._forge_fp8_lora_A, linear._forge_fp8_lora_B, True
+
+    all_a = []
+    all_b = []
+
+    for patch in weight_patches:
+        if not isinstance(patch, (tuple, list)) or len(patch) < 5:
+            return None, None, False
+
+        strength, adapter, strength_model, offset, function = patch[:5]
+
+        if strength == 0:
+            continue
+        if strength_model != 1.0 or offset is not None or function is not None:
+            return None, None, False
+
+        # Only classic LoRA can be composed into a fast low-rank residual.
+        if getattr(adapter, "name", None) != "lora" or not hasattr(adapter, "weights"):
+            return None, None, False
+
+        up, down, alpha, mid, dora_scale, reshape = adapter.weights
+        if dora_scale is not None or reshape is not None:
+            return None, None, False
+
+        rank = down.shape[0] if down.ndim >= 2 else 1
+        scale = strength * ((alpha / rank) if alpha is not None else 1.0)
+
+        curr_a = down
+        if mid is not None:
+            curr_a = torch.mm(mid.flatten(start_dim=1), down.flatten(start_dim=1)).reshape(down.shape)
+
+        all_a.append(curr_a.flatten(start_dim=1) * scale)
+        all_b.append(up.flatten(start_dim=1))
+
+    if not all_a:
+        linear._forge_fp8_lora_cache_key = cache_key
+        linear._forge_fp8_lora_A = None
+        linear._forge_fp8_lora_B = None
+        return None, None, True
+
+    dtype = x.dtype if x.dtype in [torch.float16, torch.bfloat16, torch.float32] else torch.float16
+    lora_a = torch.cat(all_a, dim=0).to(device=x.device, dtype=dtype, non_blocking=True)
+    lora_b = torch.cat(all_b, dim=1).to(device=x.device, dtype=dtype, non_blocking=True)
+
+    linear._forge_fp8_lora_cache_key = cache_key
+    linear._forge_fp8_lora_A = lora_a
+    linear._forge_fp8_lora_B = lora_b
+    return lora_a, lora_b, True
+
+
 def fp8_linear(self: torch.nn.Linear, input: torch.Tensor):
     # https://github.com/Comfy-Org/ComfyUI/blob/v0.16.4/comfy/ops.py#L615
     if QuantizedTensor is None or TensorCoreFP8Layout is None:
@@ -879,7 +946,14 @@ def fp8_linear(self: torch.nn.Linear, input: torch.Tensor):
     tensor_3d = input.ndim == 3
 
     if tensor_3d:
+        lora_input = input.reshape(-1, input_shape[2])
+        lora_a, lora_b, lora_supported = _fp8_prepare_online_lora(self, input)
+        if not lora_supported:
+            return None
         input = input.reshape(-1, input_shape[2])
+    else:
+        lora_a = None
+        lora_b = None
 
     if input.ndim != 2:
         return None
@@ -898,6 +972,11 @@ def fp8_linear(self: torch.nn.Linear, input: torch.Tensor):
         layout_params_weight = TensorCoreFP8Layout.Params(scale=scale_weight, orig_dtype=input_dtype, orig_shape=tuple(w.shape))
         quantized_weight = QuantizedTensor(w, "TensorCoreFP8Layout", layout_params_weight)
         o = torch.nn.functional.linear(quantized_input, quantized_weight, bias)
+
+    if lora_a is not None and lora_b is not None:
+        lora_x = torch.nn.functional.linear(lora_input.to(lora_a.dtype), lora_a)
+        lora_y = torch.nn.functional.linear(lora_x, lora_b)
+        o = o + lora_y.to(o.dtype)
 
     if tensor_3d:
         o = o.reshape((input_shape[0], input_shape[1], w.shape[0]))
