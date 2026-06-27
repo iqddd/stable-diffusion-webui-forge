@@ -2,6 +2,7 @@
 
 import argparse
 import enum
+from typing import TYPE_CHECKING
 
 
 class EnumAction(argparse.Action):
@@ -138,33 +139,61 @@ sage2.add_argument("--sage-accum-dtype", type=Sage_pv_accum_dtype, default=Sage_
 
 args, _ = parser.parse_known_args()
 
-# TODO: Stop using this to hack every problem...
-dynamic_args = dict(
-    embedding_dir=None,
-    forge_unet_storage_dtype=None,
-    online_lora=False,
-    kontext=False,
-    edit=False,
-    nunchaku=False,
-    klein=False,
-    wan=False,
-    ref_latents=[],
-    concat_latent=None,
-    is_referencing=False,
-    ops=None,
-)
-"""
-Some parameters that are used throughout the Webui
-- embedding_dir: `str` - set in modules/sd_models/forge_model_reload
-- forge_unet_storage_dtype: `torch.dtype` - set in modules/sd_models/forge_model_reload
-- online_lora: `bool` - patch LoRAs on-the-fly
-- kontext: `bool` - Flux Kontext
-- edit: `bool` - Qwen-Image-Edit
-- nunchaku: `bool` - Nunchaku (SVDQ) Models
-- klein: `bool` - Flux.2 Klein
-- wan: `bool` - Wan 2.2
-- ref_latents: `list[torch.Tensor]` - Reference Latent(s) for Flux Kontext & Qwen-Image-Edit
-- concat_latent: `torch.Tensor` - Input Latent for Wan 2.2 I2V
-- is_referencing: `bool` - Appending Reference Latent(s) (by. ImageStitch)
-- ops: `str` - Operations for the Diffusion Model
-"""
+if TYPE_CHECKING:
+    import os
+
+    import torch
+
+
+class _DynamicArgsMeta(type):
+    def get(cls, key, default=None):
+        return getattr(cls, key, default)
+
+    def __getitem__(cls, key):
+        return getattr(cls, key)
+
+    def __setitem__(cls, key, value):
+        setattr(cls, key, value)
+
+    def __contains__(cls, key):
+        return hasattr(cls, key)
+
+
+class dynamic_args(metaclass=_DynamicArgsMeta):
+    """Parameters shared across WebUI subsystems."""
+
+    embedding_dir: "os.PathLike" = None
+    """Set in modules/sd_models/forge_model_reload."""
+
+    forge_unet_storage_dtype: "torch.dtype" = None
+    """Set in modules/sd_models/forge_model_reload."""
+
+    online_lora: bool = False
+    """Patch LoRAs on-the-fly."""
+
+    kontext: bool = False
+    """Flux Kontext."""
+
+    edit: bool = False
+    """Qwen-Image-Edit."""
+
+    nunchaku: bool = False
+    """Nunchaku (SVDQ) models."""
+
+    klein: bool = False
+    """Flux.2 Klein."""
+
+    wan: bool = False
+    """Wan 2.2."""
+
+    ref_latents: list["torch.Tensor"] = []
+    """Reference latents for Kontext / Edit / Klein flows."""
+
+    concat_latent: "torch.Tensor" = None
+    """Input latent for Wan 2.2 I2V."""
+
+    is_referencing: bool = False
+    """ImageStitch is currently appending references."""
+
+    ops: str = None
+    """Active diffusion operations backend."""
