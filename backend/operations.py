@@ -363,7 +363,6 @@ from backend.operations_int8 import (
     quantize_int8,
     quantize_int8_axiswise,
 )
-from backend.patcher.lora import merge_lora_to_weight
 from backend.quant_rotation import build_hadamard, rotate_activation, rotate_weight
 
 
