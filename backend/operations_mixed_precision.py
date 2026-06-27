@@ -160,6 +160,10 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 else:
                     sd = {}
 
+                if not hasattr(self, "weight"):
+                    logger.warning("Warning: state dict on uninitialized op {}".format(prefix))
+                    return sd
+
                 if self.bias is not None:
                     sd["{}bias".format(prefix)] = self.bias
 
