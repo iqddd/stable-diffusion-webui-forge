@@ -5,7 +5,7 @@ import time
 import traceback
 
 from modules_forge import main_thread
-from modules import shared, progress, errors, devices, fifo_lock, profiling
+from modules import shared, progress, devices, fifo_lock, profiling
 
 queue_lock = fifo_lock.FIFOLock()
 
@@ -76,15 +76,14 @@ def wrap_gradio_call_no_job(func, extra_outputs=None, add_stats=False):
             res = list(func(*args, **kwargs))
         except Exception as e:
             if main_thread.last_exception is not None:
-                e = main_thread.last_exception
+                error_message = main_thread.last_exception
             else:
+                error_message = f"{type(e).__name__}: {e}"
                 traceback.print_exc()
-                print(e)
 
             if extra_outputs_array is None:
                 extra_outputs_array = [None, '']
 
-            error_message = f'{type(e).__name__}: {e}'
             res = extra_outputs_array + [f"<div class='error'>{html.escape(error_message)}</div>"]
 
         devices.torch_gc()
