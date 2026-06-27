@@ -255,7 +255,7 @@ class StableDiffusionProcessing:
         self.s_noise = self.s_noise if self.s_noise is not None else opts.s_noise
 
     @property
-    def sd_model(self):
+    def sd_model(self):  # noqa: F811
         return shared.sd_model
 
     @sd_model.setter
