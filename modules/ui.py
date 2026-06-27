@@ -15,7 +15,7 @@ import modules.processing_scripts.comments as comments
 import modules.shared as shared
 from modules import extra_networks, gradio_extensions, launch_utils, paths_internal, processing, progress, prompt_parser, script_callbacks, scripts, sd_models, sd_samplers, sd_schedulers, shared_items, sysinfo, timer, ui_checkpoint_merger, ui_common, ui_extensions, ui_extra_networks, ui_loadsave, ui_postprocessing, ui_settings, ui_toprow  # noqa: F401
 from modules.call_queue import wrap_gradio_call, wrap_gradio_call_no_job, wrap_gradio_gpu_call, wrap_queued_call  # noqa: F401
-from modules.infotext_utils import PasteField, image_from_url_text
+from modules.infotext_utils import PasteField
 from modules.paths import script_path
 from modules.shared import cmd_opts, opts
 from modules.ui_common import create_refresh_button  # noqa: F401
@@ -55,6 +55,10 @@ if cmd_opts.ngrok is not None:
 
 def gr_show(visible=True):
     return {"visible": visible, "__type__": "update"}
+
+
+def use_cfg(val: float | None):
+    return gr.skip() if val is None else gr.update(interactive=(val > 1.0))
 
 
 # Using constants for these since the variation selector isn't visible.
@@ -133,7 +137,7 @@ def update_token_counter(text, steps, styles, *, is_positive=True):
         get_prompt_lengths_on_ui = sd_models.model_data.sd_model.get_prompt_lengths_on_ui
         assert get_prompt_lengths_on_ui is not None
     except Exception:
-        return f"<span class='gr-box gr-text-input'>?/?</span>"
+        return "<span class='gr-box gr-text-input'>?/?</span>"
 
     flat_prompts = reduce(lambda list1, list2: list1 + list2, prompt_schedules)
     prompts = [prompt_text for step, prompt_text in flat_prompts]
@@ -246,7 +250,7 @@ def create_ui():
                         with gr.Row():
                             distilled_cfg_scale = gr.Slider(minimum=1.0, maximum=24.0, step=0.5, label="Distilled CFG Scale", value=3.0, elem_id="txt2img_distilled_cfg_scale", scale=4)
                             cfg_scale = gr.Slider(minimum=1.0, maximum=24.0, step=0.5, label="CFG Scale", value=6.0, elem_id="txt2img_cfg_scale", scale=4)
-                            cfg_scale.change(lambda v: gr.update(interactive=(v > 1.0)), inputs=[cfg_scale], outputs=[toprow.negative_prompt], queue=False, show_progress=False)
+                            cfg_scale.change(fn=use_cfg, inputs=[cfg_scale], outputs=[toprow.negative_prompt], queue=False, show_progress=False)
                             scripts.scripts_txt2img.setup_ui_for_section(category)
 
                     elif category == "accordions":
@@ -269,7 +273,7 @@ def create_ui():
                                     hr_distilled_cfg = gr.Slider(minimum=1.0, maximum=24.0, step=0.5, label="Hires Distilled CFG Scale", value=3.0, elem_id="txt2img_hr_distilled_cfg")
                                     hr_cfg = gr.Slider(minimum=1.0, maximum=24.0, step=0.5, label="Hires CFG Scale", value=6.0, elem_id="txt2img_hr_cfg")
 
-                                with FormRow(elem_id="txt2img_hires_fix_row3", variant="compact", visible=shared.opts.hires_fix_show_sampler) as hr_checkpoint_container:
+                                with FormRow(elem_id="txt2img_hires_fix_row3", variant="compact", visible=shared.opts.hires_fix_show_sampler):
                                     hr_checkpoint_name = gr.Dropdown(label="Hires Checkpoint", elem_id="hr_checkpoint", choices=["Use same checkpoint"] + modules.sd_models.checkpoint_tiles(use_short=True), value="Use same checkpoint", scale=2)
 
                                     hr_checkpoint_refresh = ToolButton(value=refresh_symbol)
@@ -303,7 +307,7 @@ def create_ui():
                                     with gr.Column():
                                         hr_negative_prompt = gr.Textbox(label="Hires negative prompt", elem_id="hires_neg_prompt", show_label=False, lines=3, placeholder="Negative prompt for hires fix pass.\nLeave empty to use the same negative prompt as in first pass.", elem_classes=["prompt"])
 
-                                hr_cfg.change(lambda v: gr.update(interactive=(v > 1.0)), inputs=[hr_cfg], outputs=[hr_negative_prompt], queue=False, show_progress=False)
+                                hr_cfg.change(fn=use_cfg, inputs=[hr_cfg], outputs=[hr_negative_prompt], queue=False, show_progress=False)
 
                             scripts.scripts_txt2img.setup_ui_for_section(category)
 
@@ -616,15 +620,14 @@ def create_ui():
                                     scale_by.change(**on_change_args)
                                     button_update_resize_to.click(**on_change_args)
 
-                                    def updateWH(img, w, h):
-                                        if img and shared.opts.img2img_autosize == True:
-                                            return img.size[0], img.size[1]
-                                        else:
-                                            return w, h
+                                    def updateWH(img):
+                                        if img and shared.opts.img2img_autosize is True:
+                                            return _round(img.size[0]), _round(img.size[1])
+                                        return gr.skip(), gr.skip()
 
                                     img_sources = [init_img.background, sketch.background, init_img_with_mask.background, inpaint_color_sketch.background, init_img_inpaint]
                                     for i in img_sources:
-                                        i.change(fn=updateWH, inputs=[i, width, height], outputs=[width, height], show_progress="hidden")
+                                        i.change(fn=updateWH, inputs=[i], outputs=[width, height], show_progress="hidden")
                                         i.change(**on_change_args)
 
                             tab_scale_to.select(fn=lambda: 0, outputs=[selected_scale_tab])
@@ -643,7 +646,7 @@ def create_ui():
                             distilled_cfg_scale = gr.Slider(minimum=0.0, maximum=24.0, step=0.5, label="Distilled CFG Scale", value=3.0, elem_id="img2img_distilled_cfg_scale", scale=4)
                             cfg_scale = gr.Slider(minimum=1.0, maximum=24.0, step=0.5, label="CFG Scale", value=6.0, elem_id="img2img_cfg_scale", scale=4)
                             image_cfg_scale = gr.Slider(minimum=0, maximum=3.0, step=0.05, label="Image CFG Scale", value=1.5, elem_id="img2img_image_cfg_scale", visible=False)
-                            cfg_scale.change(lambda v: gr.update(interactive=(v > 1.0)), inputs=[cfg_scale], outputs=[toprow.negative_prompt], queue=False, show_progress=False)
+                            cfg_scale.change(fn=use_cfg, inputs=[cfg_scale], outputs=[toprow.negative_prompt], queue=False, show_progress=False)
                             scripts.scripts_img2img.setup_ui_for_section(category)
 
                     elif category == "accordions":
