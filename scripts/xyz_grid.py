@@ -115,8 +115,8 @@ def apply_size(p: StableDiffusionProcessing, x: str, _):
         logger.error(f'Invalid Size "{x}" for X/Y/Z Plot')
 
 
-def apply_vae(p: StableDiffusionProcessing, x: str, xs: list[str]):
-    p.override_settings["sd_vae"] = (find_vae(x), xs)
+def apply_vae(p: StableDiffusionProcessing, x: str, _):
+    p.override_settings["sd_vae"] = find_vae(x)
 
 
 def apply_styles(p: StableDiffusionProcessing, x: str, _):
@@ -197,12 +197,17 @@ def refresh_loading_params_for_xyz_grid():
 
 
 def find_vae(name: str) -> str:
-    if name is None or (name := name.strip().lower()) == "none":
+    if name is None:
         return "None"
-    elif name in ("auto", "automatic"):
-        return "Automatic"
+
+    stripped = name.strip()
+    lowered = stripped.lower()
+    if lowered == "none":
+        return "None"
+    if lowered in ("auto", "automatic"):
+        return None
     else:
-        return sd_vae.vae_dict[name]
+        return sd_vae.vae_dict[stripped]
 
 
 def boolean_choice(reverse: bool = False):
@@ -301,7 +306,7 @@ axis_options = [
     AxisOptionImg2Img("Sampler", str, apply_field("sampler_name"), format_value=format_value, confirm=confirm_samplers, choices=lambda: [x.name for x in sd_samplers.samplers_for_img2img if x.name not in opts.hide_samplers]),
     AxisOption("Schedule type", str, apply_field("scheduler"), choices=lambda: [x.label for x in sd_schedulers.schedulers]),
     AxisOption("Checkpoint name", str, apply_checkpoint, format_value=format_remove_path, confirm=confirm_checkpoints, cost=1.0, choices=lambda: sorted(sd_models.checkpoints_list, key=str.casefold)),
-    AxisOption("VAE", str, apply_vae, cost=0.7, choices=lambda: ["Automatic", "None"] + list(sd_vae.vae_dict)),
+    AxisOption("VAE", str, apply_vae, cost=0.7, choices=lambda: ["None", *sorted(sd_vae.vae_dict.keys())]),
     AxisOption("Clip skip", int, apply_override("CLIP_stop_at_last_layers")),
     AxisOption("Denoising", float, apply_field("denoising_strength")),
     AxisOption("Initial noise multiplier", float, apply_field("initial_noise_multiplier")),
