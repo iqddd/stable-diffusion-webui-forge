@@ -92,6 +92,12 @@ class ForgeDiffusionEngine:
         self.ref_latents.clear()
         memory_management.soft_empty_cache()
 
+    def set_shift(self, shift: float):
+        if not self.use_shift:
+            return
+        self.forge_objects.unet.model.predictor.set_parameters(shift=shift)
+        memory_management.logger.debug(f"Shift: {shift}")
+
     def save_unet(self, filename):
         import safetensors.torch as sf
 
