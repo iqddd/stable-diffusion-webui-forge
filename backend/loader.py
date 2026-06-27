@@ -79,6 +79,13 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
             config = AutoencoderKLFlux2.load_config(config_path)
 
+            decoder_conv_in = state_dict.get("decoder.conv_in.weight")
+            if decoder_conv_in is not None:
+                ch_mult = config["block_out_channels"][-1] // config["block_out_channels"][0]
+                decoder_base_channels = int(decoder_conv_in.shape[0] // ch_mult)
+                if decoder_base_channels != config["block_out_channels"][0]:
+                    config["dch"] = decoder_base_channels
+
             with no_init_weights():
                 with using_forge_operations(device=memory_management.cpu, dtype=memory_management.vae_dtype(), bnb_dtype="vae"):
                     model = AutoencoderKLFlux2.from_config(config)
