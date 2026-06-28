@@ -79,6 +79,8 @@ class Wan(ForgeDiffusionEngine):
 
     @torch.inference_mode()
     def image_to_video(self, length: int, latent_shape: list[int]):
+        # https://github.com/Comfy-Org/ComfyUI/blob/v0.20.1/comfy_extras/nodes_wan.py#L209
+
         if self.start_image is not None:
             start_image = self.start_image.movedim(1, -1)
             _, h, w, _ = start_image.shape
@@ -96,6 +98,8 @@ class Wan(ForgeDiffusionEngine):
             memory_management.logger.info("[Wan] ImageToVideo")
         elif self.start_image is None and self.end_image is not None:
             memory_management.logger.info("[Wan] LastFrameToVideo")
+        else:
+            raise SystemError("No images passed to Wan I2V...?")
 
         image = torch.ones((length, h, w, 3), device="cpu", dtype=torch.float32).mul(0.5)
         mask = torch.ones((1, 1, latent_shape[2] * 4, latent_shape[-2], latent_shape[-1]), device="cpu", dtype=torch.float32)
@@ -111,11 +115,14 @@ class Wan(ForgeDiffusionEngine):
         concat_latent_image = self.forge_objects.vae.encode(image[:, :, :, :3])
         concat_mask = mask.view(1, mask.shape[2] // 4, 4, mask.shape[3], mask.shape[4]).transpose(1, 2)
 
-        image = concat_latent_image
-        mask = concat_mask
+        # https://github.com/Comfy-Org/ComfyUI/blob/v0.20.1/comfy/model_base.py#L1291
 
-        extra_channels = 20
-        latent_dim = 16
+        image: torch.Tensor = concat_latent_image
+        mask: torch.Tensor = concat_mask
+
+        extra_channels: int = 20
+        latent_dim: int = 16
+
         for i in range(0, image.shape[1], latent_dim):
             image[:, i : i + latent_dim] = self.forge_objects.vae.first_stage_model.process_in(image[:, i : i + latent_dim])
         image = resize_to_batch_size(image, latent_shape[0])
@@ -136,6 +143,7 @@ class Wan(ForgeDiffusionEngine):
         z = torch.cat((mask, image), dim=1)
 
         dynamic_args.concat_latent = z.cpu()
+
         self.start_image = None
 
     @torch.inference_mode()
@@ -146,15 +154,27 @@ class Wan(ForgeDiffusionEngine):
         x = x.mul(0.5).add(0.5)
 
         if dynamic_args.is_referencing:
-            self.end_image = x.cpu()
             if b == 1:
-                return None
+                # FirstLastFrameToVideo
+                self.end_image = x.cpu()
+                assert self.forge_objects.unet.model.diffusion_model.in_dim == 36
+                return
+            else:
+                # LastFrameToVideo
+                self.end_image = x.cpu()
+                assert self.forge_objects.unet.model.diffusion_model.in_dim == 36
+
         else:
             if b == 1:
+                # img2img
                 sample = self.forge_objects.vae.encode(x.movedim(1, -1))
                 sample = self.forge_objects.vae.first_stage_model.process_in(sample)
+                assert self.forge_objects.unet.model.diffusion_model.in_dim == 16
                 return sample.to(x)
-            self.start_image = x.cpu()
+            else:
+                # FirstFrameToVideo
+                self.start_image = x.cpu()
+                assert self.forge_objects.unet.model.diffusion_model.in_dim == 36
 
         latent = torch.zeros([1, 16, ((b - 1) // 4) + 1, h // 8, w // 8], device=self.forge_objects.vae.device)
         self.image_to_video(b, list(latent.shape))

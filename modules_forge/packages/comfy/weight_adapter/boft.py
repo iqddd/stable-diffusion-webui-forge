@@ -58,15 +58,10 @@ class BOFTAdapter(WeightAdapterBase):
         intermediate_dtype=torch.float32,
         original_weight=None,
     ):
-        if strength == 0.0:
-            return weight
-
         v = self.weights
         blocks = v[0]
         rescale = v[1]
         alpha = v[2]
-        if alpha is None:
-            alpha = 0
         dora_scale = v[3]
 
         blocks = memory_management.cast_to_device(blocks, weight.device, intermediate_dtype)
@@ -85,11 +80,8 @@ class BOFTAdapter(WeightAdapterBase):
                 q_norm = torch.norm(q) + 1e-8
                 if q_norm > alpha:
                     normed_q = q * alpha / q_norm
-            # Scale the skew-symmetric generator before Cayley so the
-            # intermediate strength still produces an orthogonal rotation.
-            q_strength = normed_q * strength
             # use float() to prevent unsupported type in .inverse()
-            r = (I + q_strength) @ (I - q_strength).float().inverse()
+            r = (I + normed_q) @ (I - normed_q).float().inverse()
             r = r.to(weight)
             inp = org = weight
 
@@ -98,21 +90,21 @@ class BOFTAdapter(WeightAdapterBase):
                 bi = r[i]
                 g = 2
                 k = 2**i * r_b
+                if strength != 1:
+                    bi = bi * strength + (1 - strength) * I
                 inp = inp.unflatten(0, (-1, g, k)).transpose(1, 2).flatten(0, 2).unflatten(0, (-1, boft_b))
                 inp = torch.einsum("b i j, b j ...-> b i ...", bi, inp)
                 inp = inp.flatten(0, 1).unflatten(0, (-1, k, g)).transpose(1, 2).flatten(0, 2)
 
             if rescale is not None:
-                # Rescale is not orthogonal by itself, so interpolate it
-                # separately toward identity for smooth strength control.
-                inp = inp * (1 + strength * (rescale - 1))
+                inp = inp * rescale
 
             lora_diff = inp - org
             lora_diff = memory_management.cast_to_device(lora_diff, weight.device, intermediate_dtype)
             if dora_scale is not None:
-                weight = weight_decompose(dora_scale, weight, lora_diff, 1.0, 1.0, intermediate_dtype, function)
+                weight = weight_decompose(dora_scale, weight, lora_diff, alpha, strength, intermediate_dtype, function)
             else:
-                weight += function(lora_diff.type(weight.dtype))
+                weight += function((strength * lora_diff).type(weight.dtype))
         except Exception as e:
             logging.error("ERROR {} {} {}".format(self.name, key, e))
         return weight

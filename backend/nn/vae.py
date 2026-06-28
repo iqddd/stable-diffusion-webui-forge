@@ -49,7 +49,7 @@ class Upsample(nn.Module):
     def forward(self, x):
         try:
             x = F.interpolate(x, scale_factor=2.0, mode="nearest")
-        except Exception:
+        except Exception as e:
             b, c, h, w = x.shape
             out = torch.empty((b, c, h * 2, w * 2), dtype=x.dtype, layout=x.layout, device=x.device)
             split = 8
@@ -321,31 +321,7 @@ class AutoencoderKLFlux2(IntegratedAutoencoderKL):
     config_name = "config.json"
 
     @register_to_config
-    def __init__(
-        self,
-        in_channels=3,
-        out_channels=3,
-        down_block_types=("DownEncoderBlock2D",),
-        up_block_types=("UpDecoderBlock2D",),
-        block_out_channels=(64,),
-        layers_per_block=1,
-        act_fn="silu",
-        latent_channels=4,
-        norm_num_groups=32,
-        sample_size=32,
-        scaling_factor=0.18215,
-        shift_factor=0.0,
-        latents_mean=None,
-        latents_std=None,
-        force_upcast=True,
-        use_quant_conv=True,
-        use_post_quant_conv=True,
-        *,
-        mugen: bool = False,
-        ech: int = None,
-        dch: int = None,
-        **kwargs,
-    ):
+    def __init__(self, in_channels=3, out_channels=3, block_out_channels=(64,), layers_per_block=1, latent_channels=4, use_quant_conv=True, use_post_quant_conv=True, *, mugen: bool = False, ech: int = None, dch: int = None, **kwargs):
         del kwargs
         super().__init__()
 

@@ -39,20 +39,13 @@ def load_lora(lora, to_load):
     def convert_lora_bfl_control(sd):  # BFL loras for Flux
         sd_out = {}
         for k in sd:
-            base_key = "diffusion_model.{}".format(k.replace(".lora_B.bias", ".diff_b"))
-            if "_norm.scale" in base_key:
-                sd_out[base_key.replace("_norm.scale", "_norm.scale.set_weight")] = sd[k]
-                sd_out[base_key.replace("_norm.scale", "_norm.weight.set_weight")] = sd[k]
-            else:
-                sd_out[base_key] = sd[k]
+            k_to = "diffusion_model.{}".format(k.replace(".lora_B.bias", ".diff_b").replace("_norm.scale", "_norm.scale.set_weight"))
+            sd_out[k_to] = sd[k]
 
         sd_out["diffusion_model.img_in.reshape_weight"] = torch.tensor([sd["img_in.lora_B.weight"].shape[0], sd["img_in.lora_A.weight"].shape[1]])
         return sd_out
 
-    if "img_in.lora_A.weight" in lora and (
-        "single_blocks.0.norm.key_norm.scale" in lora
-        or "single_blocks.0.norm.key_norm.weight" in lora
-    ):
+    if "img_in.lora_A.weight" in lora and "single_blocks.0.norm.key_norm.scale" in lora:
         lora = convert_lora_bfl_control(lora)
 
     patch_dict = {}
@@ -186,22 +179,6 @@ def model_lora_keys_clip(model, key_map={}):
 
 
 def model_lora_keys_unet(model, key_map={}):
-    def resolve_target_key(target_key, state_dict_keys):
-        if isinstance(target_key, tuple):
-            resolved_base = resolve_target_key(target_key[0], state_dict_keys)
-            return (resolved_base, *target_key[1:])
-        if target_key in state_dict_keys:
-            return target_key
-        if target_key.endswith(".scale"):
-            alt_key = "{}.weight".format(target_key[:-len(".scale")])
-            if alt_key in state_dict_keys:
-                return alt_key
-        if target_key.endswith(".weight"):
-            alt_key = "{}.scale".format(target_key[:-len(".weight")])
-            if alt_key in state_dict_keys:
-                return alt_key
-        return target_key
-
     sd = model.state_dict()
     sdk = sd.keys()
 
@@ -235,7 +212,7 @@ def model_lora_keys_unet(model, key_map={}):
         diffusers_keys = flux_to_diffusers(model.diffusion_model.config, output_prefix="diffusion_model.")
         for k in diffusers_keys:
             if k.endswith(".weight"):
-                to = resolve_target_key(diffusers_keys[k], sdk)
+                to = diffusers_keys[k]
                 key_map["transformer.{}".format(k[: -len(".weight")])] = to  # simpletrainer and probably regular diffusers flux lora format
                 key_map["lycoris_{}".format(k[: -len(".weight")].replace(".", "_"))] = to  # simpletrainer lycoris
                 key_map["lora_transformer_{}".format(k[: -len(".weight")].replace(".", "_"))] = to  # onetrainer

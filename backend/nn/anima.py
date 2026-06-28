@@ -8,8 +8,8 @@
 import math
 from typing import Callable, Optional
 
+import comfy_kitchen as ck
 import torch
-import torch.nn.functional as F
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 from torch import nn
@@ -55,9 +55,9 @@ class VideoRopePosition3DEmb(nn.Module):
         w_theta = 10000.0 * self.w_ntk_factor
         t_theta = 10000.0 * self.t_ntk_factor
 
-        h_spatial_freqs = 1.0 / (h_theta ** self.dim_spatial_range.to(device=device))
-        w_spatial_freqs = 1.0 / (w_theta ** self.dim_spatial_range.to(device=device))
-        temporal_freqs = 1.0 / (t_theta ** self.dim_temporal_range.to(device=device))
+        h_spatial_freqs = 1.0 / (h_theta ** self.dim_spatial_range.to(dtype=torch.float16, device=device))
+        w_spatial_freqs = 1.0 / (w_theta ** self.dim_spatial_range.to(dtype=torch.float16, device=device))
+        temporal_freqs = 1.0 / (t_theta ** self.dim_temporal_range.to(dtype=torch.float16, device=device))
 
         seq = torch.arange(max(H, W, T), dtype=torch.float, device=device)
         half_emb_h = torch.outer(seq[:H].to(device=device), h_spatial_freqs)
@@ -118,13 +118,6 @@ class SelfCrossAttention(nn.Module):
         self.output_proj = nn.Linear(inner_dim, query_dim, bias=False)
         self.output_dropout = nn.Dropout(dropout) if dropout > 1e-4 else nn.Identity()
 
-    @staticmethod
-    def apply_rotary_pos_emb(t: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
-        t_ = t.reshape(*t.shape[:-1], 2, -1).movedim(-2, -1).unsqueeze(-2).float()
-        t_out = freqs[..., 0] * t_[..., 0] + freqs[..., 1] * t_[..., 1]
-        t_out = t_out.movedim(-1, -2).reshape(*t.shape).type_as(t)
-        return t_out
-
     def compute_qkv(self, x: torch.Tensor, context: Optional[torch.Tensor] = None, rope_emb: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         q = self.q_proj(x)
         k = self.k_proj(x if context is None else context)
@@ -138,8 +131,7 @@ class SelfCrossAttention(nn.Module):
         k = self.k_norm(k)
         v = self.v_norm(v)
         if self.is_SelfAttn and rope_emb is not None:
-            q = self.apply_rotary_pos_emb(q, rope_emb)
-            k = self.apply_rotary_pos_emb(k, rope_emb)
+            q, k = ck.apply_rope_split_half(q, k, rope_emb)
 
         return q, k, v
 
@@ -336,7 +328,7 @@ class Block(nn.Module):
             h=H,
             w=W,
         )
-        x_B_T_H_W_D = x_B_T_H_W_D + gate_self_attn_B_T_1_1_D.to(residual_dtype) * result_B_T_H_W_D.to(residual_dtype)
+        x_B_T_H_W_D = torch.addcmul(x_B_T_H_W_D, gate_self_attn_B_T_1_1_D.to(residual_dtype), result_B_T_H_W_D.to(residual_dtype))
 
         def _x_fn(_x_B_T_H_W_D: torch.Tensor, layer_norm_cross_attn: Callable, _scale_cross_attn_B_T_1_1_D: torch.Tensor, _shift_cross_attn_B_T_1_1_D: torch.Tensor, transformer_options: Optional[dict] = {}) -> torch.Tensor:
             _normalized_x_B_T_H_W_D = self._fn(_x_B_T_H_W_D, layer_norm_cross_attn, _scale_cross_attn_B_T_1_1_D, _shift_cross_attn_B_T_1_1_D)
@@ -361,7 +353,7 @@ class Block(nn.Module):
             shift_cross_attn_B_T_1_1_D,
             transformer_options=transformer_options,
         )
-        x_B_T_H_W_D = result_B_T_H_W_D.to(residual_dtype) * gate_cross_attn_B_T_1_1_D.to(residual_dtype) + x_B_T_H_W_D
+        x_B_T_H_W_D = torch.addcmul(x_B_T_H_W_D, gate_cross_attn_B_T_1_1_D.to(residual_dtype), result_B_T_H_W_D.to(residual_dtype))
 
         normalized_x_B_T_H_W_D = self._fn(
             x_B_T_H_W_D,
@@ -370,7 +362,7 @@ class Block(nn.Module):
             shift_mlp_B_T_1_1_D,
         )
         result_B_T_H_W_D = self.mlp(normalized_x_B_T_H_W_D.to(compute_dtype))
-        x_B_T_H_W_D = x_B_T_H_W_D + gate_mlp_B_T_1_1_D.to(residual_dtype) * result_B_T_H_W_D.to(residual_dtype)
+        x_B_T_H_W_D = torch.addcmul(x_B_T_H_W_D, gate_mlp_B_T_1_1_D.to(residual_dtype), result_B_T_H_W_D.to(residual_dtype))
         return x_B_T_H_W_D
 
 

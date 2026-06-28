@@ -227,7 +227,7 @@ class Qwen2DVAE(nn.Module, ProcessLatent, ConfigMixin):
             dropout=dropout,
         )
 
-    def _flatten_frames(self, x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, int] | None]:
+    def _flatten_frames(self, x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, int]]:
         if x.ndim == 4:
             return x, None
         if x.ndim != 5:
@@ -237,7 +237,7 @@ class Qwen2DVAE(nn.Module, ProcessLatent, ConfigMixin):
         x = x.permute(0, 2, 1, 3, 4).reshape(batch * frames, channels, height, width)
         return x, (batch, frames)
 
-    def _restore_frames(self, x: torch.Tensor, frame_info: tuple[int, int] | None) -> torch.Tensor:
+    def _restore_frames(self, x: torch.Tensor, frame_info: tuple[int, int]) -> torch.Tensor:
         if frame_info is None:
             return x
 

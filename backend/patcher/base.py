@@ -30,7 +30,7 @@ import torch
 from backend import memory_management, utils
 from backend.float import stochastic_rounding
 from backend.logging import setup_logger
-from backend.patcher.lora import LoraLoader, merge_lora_to_weight, string_to_seed
+from backend.patcher.lora import merge_lora_to_weight, string_to_seed
 from backend.quant_ops import QuantizedTensor
 
 logger = logging.getLogger("model_patcher")

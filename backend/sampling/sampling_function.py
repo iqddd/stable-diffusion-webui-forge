@@ -5,7 +5,6 @@
 
 import collections
 import math
-import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -20,9 +19,6 @@ from backend.sampling.condition import (
     compile_conditions,
     compile_weighted_conditions,
 )
-
-_FORGE_FORCE_BATCH_COND_UNCOND = os.environ.get("FORGE_FORCE_BATCH_COND_UNCOND", "").strip().lower() in {"1", "true", "yes", "on"}
-_FORGE_FORCE_BATCH_COND_UNCOND_WARNED = False
 
 
 def get_area_and_mult(conds, x_in, timestep_in):
@@ -158,8 +154,6 @@ def compute_cond_indices(cond_or_uncond, sigmas):
 
 
 def calc_cond_uncond_batch(model, cond, uncond, x_in, timestep, model_options):
-    global _FORGE_FORCE_BATCH_COND_UNCOND_WARNED
-
     out_cond = torch.zeros_like(x_in)
     out_count = torch.ones_like(x_in) * 1e-37
 
@@ -211,22 +205,12 @@ def calc_cond_uncond_batch(model, cond, uncond, x_in, timestep, model_options):
                 logger.warning('You can add "--reserve-vram 2" to keep a larger headroom')
                 logger.warning('You can also (not recommended) add "--disable-gpu-warning" to remove this warning')
 
-        has_cond_and_uncond = any(to_run[i][1] == COND for i in to_batch_temp) and any(to_run[i][1] == UNCOND for i in to_batch_temp)
-        if _FORGE_FORCE_BATCH_COND_UNCOND and has_cond_and_uncond:
-            to_batch = to_batch_temp
-
-            if not _FORGE_FORCE_BATCH_COND_UNCOND_WARNED:
-                memory_management.logger.warning(
-                    'FORGE_FORCE_BATCH_COND_UNCOND is enabled: forcing combined cond/uncond batch and skipping VRAM-based splitting (may OOM).'
-                )
-                _FORGE_FORCE_BATCH_COND_UNCOND_WARNED = True
-        else:
-            for i in range(1, len(to_batch_temp) + 1):
-                batch_amount = to_batch_temp[: len(to_batch_temp) // i]
-                input_shape = [len(batch_amount) * first_shape[0]] + list(first_shape)[1:]
-                if model.memory_required(input_shape) < free_memory:
-                    to_batch = batch_amount
-                    break
+        for i in range(1, len(to_batch_temp) + 1):
+            batch_amount = to_batch_temp[: len(to_batch_temp) // i]
+            input_shape = [len(batch_amount) * first_shape[0]] + list(first_shape)[1:]
+            if model.memory_required(input_shape) < free_memory:
+                to_batch = batch_amount
+                break
 
         input_x = []
         mult = []

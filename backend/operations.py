@@ -376,6 +376,7 @@ from backend.operations_int8 import (
     quantize_int8,
     quantize_int8_axiswise,
 )
+from backend.patcher.lora import merge_lora_to_weight
 from backend.quant_rotation import build_hadamard, rotate_activation, rotate_weight
 
 
@@ -625,8 +626,9 @@ class ForgeOperationsInt8(ForgeOperations):
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             """Fast forward using torch._int_mm for quantized weights."""
 
-            # Check if patcher/lowvram hooks need to materialize weights on device.
-            need_cast = self.parameters_manual_cast or len(getattr(self, "weight_function", [])) > 0 or len(getattr(self, "bias_function", [])) > 0
+            # Check if ComfyUI needs to manage weight transfer (VBAR, offloading, LoRA patches, etc.)
+            # This mirrors the base class check in disable_weight_init.Linear.forward()
+            need_cast = self.parameters_manual_cast or len(self.weight_function) > 0 or len(self.bias_function) > 0
 
             if not self._is_quantized:
                 if need_cast:
@@ -830,13 +832,18 @@ class ForgeOperationsGGUF(ForgeOperations):
             self.weight = None
             self.bias = None
 
+            self._dtype = current_dtype
+
         def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
             if hasattr(self, "dummy"):
                 if (computation_dtype := self.dummy["dtype"]) not in [torch.float16, torch.bfloat16]:
                     computation_dtype = torch.float16
 
                 if prefix + "weight" in state_dict:
-                    self.weight = state_dict[prefix + "weight"].to(device=self.dummy["device"])
+                    _weight = state_dict[prefix + "weight"].to(device=self.dummy["device"])
+                    if not isinstance(_weight, torch.nn.Parameter):
+                        _weight = torch.nn.Parameter(_weight, requires_grad=False)
+                    self.weight = _weight
                     self.weight.computation_dtype = computation_dtype
 
                 del self.dummy
@@ -856,69 +863,18 @@ class ForgeOperationsGGUF(ForgeOperations):
         def forward(self, x):
             weight, bias, signal = weights_manual_cast(self, x, weight_fn=dequantize_tensor, skip_weight_dtype=True, skip_bias_dtype=True)
             with main_stream_worker(weight, bias, signal):
-                return torch.nn.functional.embedding(x, weight, self.padding_idx, self.max_norm, self.norm_type, self.scale_grad_by_freq, self.sparse)
-
-
-# region Tiled
-
-
-class TiledOperations(ForgeOperations):
-    class Conv2d(ForgeOperations.Conv2d):
-        tile_size: int
-
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self._3x1x1 = self.kernel_size == (3, 3) and self.stride == (1, 1) and self.padding == (1, 1)
-            self.tile_size = args.tiled_conv2d
-
-        @torch.inference_mode()
-        def forward(self, x: torch.Tensor):
-            if not self._3x1x1:
-                return super().forward(x)
-
-            b, c, h, w = x.shape
-
-            if h <= self.tile_size and w <= self.tile_size:
-                return super().forward(x)
-
-            orig_forward = super().forward
-            out_channels = self.out_channels if self.out_channels is not None else c
-            out = torch.empty((b, out_channels, h, w), device=x.device, dtype=x.dtype, memory_format=torch.contiguous_format)
-            non_blocking = memory_management.device_supports_non_blocking(x.device)
-
-            for i in range(0, h, self.tile_size):
-                i0 = max(i - 1, 0)
-                i1 = min(i + self.tile_size + 1, h)
-                pi = i - i0
-                ph = min(self.tile_size, h - i)
-
-                for j in range(0, w, self.tile_size):
-                    j0 = max(j - 1, 0)
-                    j1 = min(j + self.tile_size + 1, w)
-                    tile = x[:, :, i0:i1, j0:j1]
-                    tile_conv = orig_forward(tile)
-
-                    pj = j - j0
-                    pw = min(self.tile_size, w - j)
-                    out[:, :, i : i + ph, j : j + pw].copy_(tile_conv[:, :, pi : pi + ph, pj : pj + pw], non_blocking=non_blocking)
-                    del tile_conv
-
-            return out
+                o = torch.nn.functional.embedding(x, weight, self.padding_idx, self.max_norm, self.norm_type, self.scale_grad_by_freq, self.sparse)
+                return o.to(dtype=self._dtype)
 
 
 # region fp8
 
 
-if memory_management.ck_enabled():
-    from backend.operations_mixed_precision import (
-        QuantizedTensor,
-        TensorCoreFP8Layout,
-        mixed_precision_ops,
-    )
-else:
-    QuantizedTensor = None
-    TensorCoreFP8Layout = None
-    mixed_precision_ops = None
+from backend.operations_mixed_precision import (
+    QuantizedTensor,
+    TensorCoreFP8Layout,
+    mixed_precision_ops,
+)
 
 
 def _fp8_prepare_online_lora(linear: torch.nn.Linear, x: torch.Tensor):
@@ -929,7 +885,6 @@ def _fp8_prepare_online_lora(linear: torch.nn.Linear, x: torch.Tensor):
     weight_patches = loras.get("weight", None)
     bias_patches = loras.get("bias", None)
 
-    # bias patches and non-LoRA adapters are not supported by the fast low-rank path
     if bias_patches:
         return None, None, False
 
@@ -954,7 +909,6 @@ def _fp8_prepare_online_lora(linear: torch.nn.Linear, x: torch.Tensor):
         if strength_model != 1.0 or offset is not None or function is not None:
             return None, None, False
 
-        # Only classic LoRA can be composed into a fast low-rank residual.
         if getattr(adapter, "name", None) != "lora" or not hasattr(adapter, "weights"):
             return None, None, False
 
@@ -990,8 +944,6 @@ def _fp8_prepare_online_lora(linear: torch.nn.Linear, x: torch.Tensor):
 
 def fp8_linear(self: torch.nn.Linear, input: torch.Tensor):
     # https://github.com/Comfy-Org/ComfyUI/blob/v0.16.4/comfy/ops.py#L615
-    if QuantizedTensor is None or TensorCoreFP8Layout is None:
-        return None
     dtype = self.weight.dtype
     if dtype is not torch.float8_e4m3fn:
         return None
@@ -1032,6 +984,7 @@ def fp8_linear(self: torch.nn.Linear, input: torch.Tensor):
         lora_x = torch.nn.functional.linear(lora_input.to(lora_a.dtype), lora_a)
         lora_y = torch.nn.functional.linear(lora_x, lora_b)
         o = o + lora_y.to(o.dtype)
+
     if tensor_3d:
         o = o.reshape((input_shape[0], input_shape[1], w.shape[0]))
 
@@ -1046,6 +999,9 @@ class ForgeOperationsFP8(ForgeOperations):
                     return out
             except Exception as e:
                 memory_management.logger.error(f"Error during fp8_fast: {e}")
+
+            if getattr(self, "forge_online_loras", None):
+                return ForgeOperations.Linear.forward(self, x)
 
             return super().forward(x)
 
@@ -1165,7 +1121,7 @@ def using_forge_operations(operations=None, device=None, dtype=None, manual_cast
         elif bnb_dtype in ["vae"] and args.tiled_conv2d:
             memory_management.logger.info(f"Using TiledOperations ({args.tiled_conv2d}) for VAE")
             operations = TiledOperations
-        elif dtype is torch.float8_e4m3fn and args.fast_fp8 and memory_management.ck_enabled() and memory_management.supports_fp8_compute(memory_management.get_torch_device()):
+        elif dtype is torch.float8_e4m3fn and args.fast_fp8 and memory_management.supports_fp8_compute(memory_management.get_torch_device()):
             operations = ForgeOperationsFP8
         else:
             operations = ForgeOperations

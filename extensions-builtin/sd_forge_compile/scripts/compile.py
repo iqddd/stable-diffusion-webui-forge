@@ -1,4 +1,7 @@
+# https://github.com/Comfy-Org/ComfyUI/blob/master/comfy_extras/nodes_torch_compile.py
+
 import logging
+from functools import wraps
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -19,12 +22,15 @@ except ImportError:
 else:
     TRITON_AVAILABLE = True
 
+_COMPILE_CONFIG_KEY = "_torch_compile_config"
+_COMPILE_WRAPPER_KEY = "_torch_compile_wrapper"
+_ORIG_APPLY_KEY = "_orig_apply_model"
+
 logger = logging.getLogger("compile")
 setup_logger(logger)
 
 
 def skip_torch_compile_dict(guard_entries):
-    # https://github.com/Comfy-Org/ComfyUI/blob/master/comfy_extras/nodes_torch_compile.py#L5
     return [("transformer_options" not in entry.name) for entry in guard_entries]
 
 
@@ -62,51 +68,37 @@ class TorchCompileForForge(scripts.Script):
             _indynamic = "Require recompilation if Resolution / Batch Size is changed"
             _no_malloc = "Does not work with --cuda-malloc"
 
-            gr.Markdown(
-                rf"""
+            gr.Markdown(rf"""
 **torch.compile** speeds up the inference by compiling the model ahead of time
 - **guard_filter_fn:** Compile the Fastest ; {_indynamic}
 - **dynamic:** {_dynamic} ; Slower to Compile
 - **max-autotune:** Best Runtime Speed ; {_indynamic} ; {_no_malloc}
 - **max-autotune-no-cudagraphs:** {_dynamic} ; Faster than **dynamic** ; Even Slower to Compile
 - **reduce-overhead:** Similar to **max-autotune** ; {_indynamic} ; {_no_malloc}
-                """
-            )
+            """)
 
         return [preset]
 
-    @staticmethod
-    def restore(kmodel: "KModel"):
-        model = get_attr(kmodel, "_model_backup")
-        set_attr_raw(kmodel, "diffusion_model", model)
-        del kmodel._compile_config
-        del kmodel._compiled_backup
-        del kmodel._model_backup
-
-    def before_process_batch(self, p, *args, **kwargs):
-        kmodel: "KModel" = p.sd_model.forge_objects.unet.model
-        if not hasattr(kmodel, "_compile_config"):
+    def process_batch(self, p, preset: str, **kwargs):
+        if preset == "Automatic":
             return
 
-        c_model = get_attr(kmodel, "diffusion_model")
-        set_attr_raw(kmodel, "_compiled_backup", c_model)
-        # temporarily restores the original model so LoRA can apply
-        model = get_attr(kmodel, "_model_backup")
-        set_attr_raw(kmodel, "diffusion_model", model)
-
-    def process_batch(self, p, preset: str, **kwargs):
         kmodel: "KModel" = p.sd_model.forge_objects.unet.model
-        compiled: bool = hasattr(kmodel, "_compile_config")
-        enable: bool = compiled if preset == "Automatic" else (preset != "Disable")
+        prev_config: tuple[str] = getattr(kmodel, _COMPILE_CONFIG_KEY, None)
 
-        if not enable:
-            if compiled:
-                self.restore(kmodel)
+        if preset == "Disable":
+            self._remove_compile_wrapper(kmodel)
             return
 
         if preset in ("max-autotune", "reduce-overhead") and cmd_args.cuda_malloc:
             logger.error(f"{preset} does not support --cuda-malloc\nModel is not compiled...")
             return
+
+        if prev_config == preset and getattr(kmodel, _ORIG_APPLY_KEY, None) is not None:
+            return
+
+        if prev_config is not None:
+            self._remove_compile_wrapper(kmodel)
 
         match preset:
             case "guard_filter_fn":
@@ -120,24 +112,35 @@ class TorchCompileForForge(scripts.Script):
             case "reduce-overhead":
                 config = dict(backend="inductor", mode="reduce-overhead", dynamic=False, fullgraph=False)
 
-        if compiled:
-            if kmodel._compile_config == preset or preset == "Automatic":
-                c_model = get_attr(kmodel, "_compiled_backup")
-                set_attr_raw(kmodel, "diffusion_model", c_model)
-                del kmodel._compiled_backup
-                return
-
-            self.restore(kmodel)
-
-        model = get_attr(kmodel, "diffusion_model")
-        set_attr_raw(kmodel, "_model_backup", model)
-
-        set_attr_raw(
-            kmodel,
-            "diffusion_model",
-            torch.compile(model, **config),
-        )
-
-        kmodel._compile_config = preset
+        self._wrap_apply_model(kmodel, config)
+        setattr(kmodel, _COMPILE_CONFIG_KEY, preset)
 
         logger.info(f"Model Compiled ({preset})")
+
+    @staticmethod
+    def _wrap_apply_model(kmodel: "KModel", compile_config: dict):
+        original_apply_model = kmodel.apply_model
+        setattr(kmodel, _ORIG_APPLY_KEY, original_apply_model)
+
+        @wraps(original_apply_model)
+        def apply_model_with_compile(*args, **kwargs):
+            orig_model = get_attr(kmodel, "diffusion_model")
+            compiled = torch.compile(orig_model, **compile_config)
+            set_attr_raw(kmodel, "diffusion_model", compiled)
+            try:
+                return original_apply_model(*args, **kwargs)
+            finally:
+                set_attr_raw(kmodel, "diffusion_model", orig_model)
+
+        kmodel.apply_model = apply_model_with_compile
+        setattr(kmodel.apply_model, _COMPILE_WRAPPER_KEY, True)
+
+    @staticmethod
+    def _remove_compile_wrapper(kmodel: "KModel"):
+        if (orig := getattr(kmodel, _ORIG_APPLY_KEY, None)) is not None:
+            if getattr(kmodel.apply_model, _COMPILE_WRAPPER_KEY, False):
+                kmodel.apply_model = orig
+
+        for attr in (_ORIG_APPLY_KEY, _COMPILE_CONFIG_KEY):
+            if hasattr(kmodel, attr):
+                delattr(kmodel, attr)

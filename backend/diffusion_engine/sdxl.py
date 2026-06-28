@@ -30,11 +30,9 @@ class StableDiffusionXL(ForgeDiffusionEngine):
             k_predictor = PredictionDiscreteFlow(estimated_config)
             unet = UnetPatcher.from_model(model=huggingface_components["unet"], diffusers_scheduler=None, k_predictor=k_predictor, config=estimated_config)
             self.use_shift = True
-            self._RF = True
         else:
             unet = UnetPatcher.from_model(model=huggingface_components["unet"], diffusers_scheduler=huggingface_components["scheduler"], config=estimated_config)
             self.use_shift = False
-            self._RF = False
 
         self.text_processing_engine_l = ClassicTextProcessingEngine(
             text_encoder=clip.cond_stage_model.clip_l,

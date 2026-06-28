@@ -6,6 +6,7 @@ if TYPE_CHECKING:
 import torch
 
 from backend import memory_management
+from backend.args import dynamic_args
 from backend.text_processing import emphasis, parsing
 from modules.shared import opts
 
@@ -20,7 +21,7 @@ class PromptChunk:
 
 class AnimaTextProcessingEngine:
     def __init__(self, text_encoder, qwen_tokenizer, t5_tokenizer):
-        super().__init__()
+        self.emphasis = emphasis.get_current_option(opts.emphasis)()
 
         self.text_encoder: "Qwen3_06B" = text_encoder
         self.qwen_tokenizer = qwen_tokenizer
@@ -77,10 +78,12 @@ class AnimaTextProcessingEngine:
         return chunks
 
     def __call__(self, texts):
+        self.emphasis = emphasis.get_current_option(opts.emphasis)()
+        if any(emphasis.uses_emphasis(x) for x in texts):
+            dynamic_args.last_extra_generation_params["Emphasis"] = self.emphasis.name
+
         zs = []
         cache: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
-
-        self.emphasis = emphasis.get_current_option(opts.emphasis)()
 
         for line in texts:
             if line in cache:

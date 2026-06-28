@@ -39,11 +39,6 @@ def load_lora_for_models(model: "UnetPatcher", clip: "CLIP", lora: dict[str, tor
     if dynamic_args.nunchaku:
         model.model.diffusion_model.loras.append((filename, strength_model))
         return model, clip
-    if dynamic_args.ops.endswith("Int8"):
-        from backend.operations_int8 import load_lora_int8
-
-        model = load_lora_int8(model, lora, strength_model, filename)
-        return model, clip
 
     model_flag: str = type(model.model).__name__ if model is not None else "default"
 
@@ -129,15 +124,7 @@ def load_networks(names: list[str], te_multipliers: list[float] = None, unet_mul
 
     online_mode = dynamic_args.online_lora or False
 
-    if current_sd.forge_objects.unet.model.storage_dtype in [torch.float32, torch.float16, torch.bfloat16]:
-        online_mode = False
-    if dynamic_args.get("ops", "").startswith("Mixed") or (
-        current_sd.forge_objects.unet.model.storage_dtype is torch.float8_e4m3fn
-        and (
-            dynamic_args.ops.startswith("fp8")
-            or dynamic_args.ops.endswith("FP8")
-        )
-    ):
+    if dynamic_args.get("ops", "").startswith("Mixed"):
         online_mode = False
 
     compiled_lora_targets = []
