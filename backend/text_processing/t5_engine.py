@@ -1,6 +1,7 @@
 import torch
 
 from backend import memory_management
+from backend.args import dynamic_args
 from backend.text_processing import emphasis, parsing
 from modules.shared import opts
 
@@ -13,7 +14,7 @@ class PromptChunk:
 
 class T5TextProcessingEngine:
     def __init__(self, text_encoder, tokenizer, min_length: int = 256, min_padding: int = -1):
-        super().__init__()
+        self.emphasis = emphasis.get_current_option(opts.emphasis)()
 
         self.text_encoder = text_encoder.transformer
         self.tokenizer = tokenizer
@@ -82,10 +83,12 @@ class T5TextProcessingEngine:
         return chunks, token_count
 
     def __call__(self, texts):
+        self.emphasis = emphasis.get_current_option(opts.emphasis)()
+        if any(emphasis.uses_emphasis(x) for x in texts):
+            dynamic_args.last_extra_generation_params["Emphasis"] = self.emphasis.name
+
         zs = []
         cache = {}
-
-        self.emphasis = emphasis.get_current_option(opts.emphasis)()
 
         for line in texts:
             if line in cache:

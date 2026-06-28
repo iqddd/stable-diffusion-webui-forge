@@ -197,17 +197,10 @@ def refresh_loading_params_for_xyz_grid():
 
 
 def find_vae(name: str) -> str:
-    if name is None:
+    if name in (None, "None"):
         return "None"
-
-    stripped = name.strip()
-    lowered = stripped.lower()
-    if lowered == "none":
-        return "None"
-    if lowered in ("auto", "automatic"):
-        return None
     else:
-        return sd_vae.vae_dict[stripped]
+        return sd_vae.vae_dict[name]
 
 
 def boolean_choice(reverse: bool = False):

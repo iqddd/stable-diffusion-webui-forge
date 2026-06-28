@@ -427,6 +427,8 @@ onOptionsChanged(function () {
 let txt2img_textarea,
     img2img_textarea = undefined;
 
+let isReloading = false;
+
 function restart_reload() {
     document.body.style.backgroundColor = "var(--background-fill-primary)";
     document.body.innerHTML =
@@ -445,9 +447,15 @@ function restart_reload() {
     };
 
     setTimeout(requestPing, 2000);
-
+    isReloading = true;
     return [];
 }
+
+window.addEventListener("beforeunload", (e) => {
+    if (isReloading || !opts.confirm_leave) return;
+    e.preventDefault();
+    e.returnValue = "";
+});
 
 // Simulate an `input` DOM event for Gradio Textbox component. Needed after you edit its contents in javascript, otherwise your edits
 // will only visible on web page and not sent to python.
@@ -471,7 +479,7 @@ function currentImg2imgSourceResolution(w, h, r) {
     if (!img) return [0, 0, r];
     const width = img.naturalWidth || img.width;
     const height = img.naturalHeight || img.height;
-    return [Math.round(width / 64.0) * 64, Math.round(height / 64.0) * 64, r];
+    return [width, height, r];
 }
 
 function updateImg2imgResizeToTextAfterChangingImage() {

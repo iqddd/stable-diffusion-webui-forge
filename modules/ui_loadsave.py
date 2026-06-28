@@ -1,4 +1,5 @@
 import json
+import math
 import os
 
 import gradio as gr
@@ -47,6 +48,10 @@ class UiLoadsave:
             if getattr(obj, "do_not_save_to_config", False):
                 return
 
+            if getattr(obj, "_internal_preset_param", False):
+                if field in ("value", "step"):
+                    return
+
             saved_value = self.ui_settings.get(key, None)
 
             if isinstance(obj, gr.Accordion) and isinstance(x, InputAccordionImpl) and field == "value":
@@ -69,6 +74,12 @@ class UiLoadsave:
                         saved_value = float(saved_value)
                     except ValueError:
                         return
+
+                if getattr(obj, "elem_id", None) in ("txt2img_width", "txt2img_height", "img2img_width", "img2img_height"):
+                    if field == "minimum":
+                        from modules.ui import _STEP
+
+                        saved_value = math.ceil(saved_value / _STEP) * _STEP
 
                 setattr(obj, field, saved_value)
                 if init_field is not None:

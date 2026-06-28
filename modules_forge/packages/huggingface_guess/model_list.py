@@ -1,4 +1,4 @@
-# reference: https://github.com/Comfy-Org/ComfyUI/blob/master/comfy/supported_models.py
+# reference: https://github.com/Comfy-Org/ComfyUI/blob/v0.24.1/comfy/supported_models.py
 
 from enum import Enum
 
@@ -51,7 +51,7 @@ class BASE:
         return True
 
     def model_type(self, state_dict):
-        return ModelType.EPS
+        return ModelType.FLOW
 
     def clip_target(self, state_dict: dict):
         return {}
@@ -118,6 +118,9 @@ class SD15(BASE):
     def inpaint_model(self):
         return self.unet_config.get("in_channels", -1) > 4
 
+    def model_type(self, state_dict):
+        return ModelType.EPS
+
     def process_clip_state_dict(self, state_dict):
         k = list(state_dict.keys())
         for x in k:
@@ -160,6 +163,9 @@ class SDXLRefiner(BASE):
 
     latent_format = latent.SDXL
     memory_usage_factor = 1.0
+
+    def model_type(self, state_dict: dict):
+        return ModelType.EPS
 
     def process_clip_state_dict(self, state_dict):
         replace_prefix = {"conditioner.embedders.0.model.": "clip_g."}
@@ -248,6 +254,9 @@ class Mugen(SDXL):
     def inpaint_model(self):
         return False
 
+    def model_type(self, state_dict):
+        return ModelType.FLOW
+
 
 class Flux(BASE):
     huggingface_repo = "black-forest-labs/FLUX.1-dev"
@@ -328,6 +337,9 @@ class Flux2K4B(Flux):
     vae_key_prefix = ["vae."]
     text_encoder_key_prefix = ["text_encoders."]
 
+    def model_type(self, state_dict):
+        return ModelType.FLOW
+
     def clip_target(self, state_dict={}):
         return {"qwen3_4b.transformer": "text_encoder"}
 
@@ -353,6 +365,9 @@ class Flux2K9B(Flux):
 
     vae_key_prefix = ["vae."]
     text_encoder_key_prefix = ["text_encoders."]
+
+    def model_type(self, state_dict):
+        return ModelType.FLOW
 
     def clip_target(self, state_dict={}):
         return {"qwen3_8b.transformer": "text_encoder"}
@@ -411,9 +426,6 @@ class Lumina2(BASE):
     text_encoder_key_prefix = ["text_encoders."]
 
     unet_target = "transformer"
-
-    def model_type(self, state_dict):
-        return ModelType.FLOW
 
     def clip_target(self, state_dict: dict):
         pref = self.text_encoder_key_prefix[0]
@@ -505,9 +517,6 @@ class WAN21_T2V(BASE):
         super().__init__(unet_config)
         self.memory_usage_factor = self.unet_config.get("dim", 2000) / 2000
 
-    def model_type(self, state_dict):
-        return ModelType.FLOW
-
     def clip_target(self, state_dict: dict):
         return {"umt5xxl": "text_encoder"}
 
@@ -546,9 +555,6 @@ class QwenImage(BASE):
 
     unet_target = "transformer"
 
-    def model_type(self, state_dict):
-        return ModelType.FLOW
-
     def clip_target(self, state_dict: dict):
         pref = self.text_encoder_key_prefix[0]
         if "{}.qwen25_7b.transformer.model.embed_tokens.weight".format(pref) in state_dict:
@@ -586,6 +592,39 @@ class ErnieImage(BASE):
         return {"ministral3_3b.transformer": "text_encoder"}
 
 
+class PiD(BASE):
+    huggingface_repo = "nvidia/PiD"
+
+    unet_config = {
+        "image_model": "pid",
+    }
+
+    sampling_settings = {
+        "shift": 1.5,
+    }
+
+    memory_usage_factor = 0.04
+
+    unet_extra_config = {}
+    latent_format = latent.RGB
+
+    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+
+    vae_key_prefix = ["vae."]
+    text_encoder_key_prefix = ["text_encoders."]
+
+    unet_target = "transformer"
+
+    def clip_target(self, state_dict: dict):
+        pref = self.text_encoder_key_prefix[0]
+        if "{}gemma2_2b.transformer.model.embed_tokens.weight".format(pref) in state_dict:
+            state_dict.pop("{}gemma2_2b.logit_scale".format(pref), None)
+            state_dict.pop("{}spiece_model".format(pref), None)
+            return {"gemma2_2b.transformer": "text_encoder"}
+        else:
+            return {"gemma2_2b": "text_encoder"}
+
+
 models = [
     SD15,
     SDXL,
@@ -603,4 +642,5 @@ models = [
     WAN21_I2V,
     QwenImage,
     ErnieImage,
+    PiD,
 ]

@@ -2,7 +2,6 @@
 
 import argparse
 import enum
-from typing import TYPE_CHECKING
 
 
 class EnumAction(argparse.Action):
@@ -77,7 +76,6 @@ parser.add_argument("--disable-flash", action="store_true", help="disable flash_
 parser.add_argument("--disable-xformers", action="store_true", help="disable xformers")
 
 parser.add_argument("--directml", type=int, nargs="?", metavar="DIRECTML_DEVICE", const=-1, help="Use torch-directml")
-parser.add_argument("--disable-ipex-optimize", action="store_true", help="Disable ipex.optimize default when loading models with Intel's Extension for PyTorch")
 parser.add_argument("--deterministic", action="store_true", help="Use slower deterministic algorithms when possible")
 
 vram_group = parser.add_mutually_exclusive_group()
@@ -95,6 +93,7 @@ parser.add_argument("--force-non-blocking", action="store_true", help="Use non-b
 parser.add_argument("--cuda-malloc", action="store_true", help="improve memory allocation")
 parser.add_argument("--cuda-stream", type=int, nargs="?", metavar="NUM_STREAMS", const=2, help="improve offloading")
 parser.add_argument("--pin-shared-memory", action="store_true", help="improve RAM utilization")
+parser.add_argument("--expandable-segments", action="store_true", help="improve memory allocation ; experimental")
 
 parser.add_argument("--fast-fp8", action="store_true", help="torch._scaled_mm")
 parser.add_argument("--fast-fp16", action="store_true", help="torch.backends.cuda.matmul.allow_fp16_accumulation")
@@ -102,9 +101,9 @@ parser.add_argument("--autotune", action="store_true", help="torch.backends.cudn
 
 parser.add_argument("--mmap-torch-files", action="store_true", help="Use mmap when loading ckpt/pt files")
 parser.add_argument("--disable-mmap", action="store_true", help="Don't use mmap when loading safetensors")
-parser.add_argument("--tiled-conv2d", type=int, default=0, metavar="TILE_SIZE", choices=[0, 64, 128, 256, 512], help="reduce VAE memory usage ; increase processing time")
 
 parser.add_argument("--tiled-conv2d", type=int, default=0, metavar="TILE_SIZE", choices=[0, 64, 128, 256, 512], help="reduce VAE memory usage ; increase processing time")
+parser.add_argument("--enable-triton-backend", action="store_true", help="Enable the use of Triton backend in comfy-kitchen")
 
 
 class SageAttentionFuncs(enum.Enum):
@@ -112,39 +111,24 @@ class SageAttentionFuncs(enum.Enum):
     fp16_triton = "fp16_triton"
     fp16_cuda = "fp16_cuda"
     fp8_cuda = "fp8_cuda"
+    fp8_cuda_pp = "fp8_cuda++"
+    sageattn3 = "sageattn3"
 
 
-class Sage_quantization_backend(enum.Enum):
-    cuda = "cuda"
-    triton = "triton"
-
-
-class Sage_qk_quant_gran(enum.Enum):
-    per_warp = "per_warp"
-    per_thread = "per_thread"
-
-
-class Sage_pv_accum_dtype(enum.Enum):
-    fp16 = "fp16"
-    fp32 = "fp32"
-    fp16fp32 = "fp16+fp32"
-    fp32fp32 = "fp32+fp32"
-
-
-sage2 = parser.add_argument_group(description="SageAttention 2")
-sage2.add_argument("--sage2-function", type=SageAttentionFuncs, default=SageAttentionFuncs.auto, action=EnumAction)
-sage2.add_argument("--sage-quantization-backend", type=Sage_quantization_backend, default=Sage_quantization_backend.triton, action=EnumAction)
-sage2.add_argument("--sage-quant-gran", type=Sage_qk_quant_gran, default=Sage_qk_quant_gran.per_thread, action=EnumAction)
-sage2.add_argument("--sage-accum-dtype", type=Sage_pv_accum_dtype, default=Sage_pv_accum_dtype.fp32, action=EnumAction)
+sage = parser.add_argument_group(description="SageAttention")
+sage.add_argument("--sage-function", type=SageAttentionFuncs, default=SageAttentionFuncs.auto, action=EnumAction)
 
 
 args, _ = parser.parse_known_args()
 
 from typing import TYPE_CHECKING
+
 if TYPE_CHECKING:
     import os
 
     import torch
+
+    from backend.misc.context_windows import IndexListContextHandler
 
 
 class _DynamicArgsMeta(type):
@@ -162,40 +146,49 @@ class _DynamicArgsMeta(type):
 
 
 class dynamic_args(metaclass=_DynamicArgsMeta):
-    """Parameters shared across WebUI subsystems."""
+    """Some parameters that are used throughout the Webui"""
 
     embedding_dir: "os.PathLike" = None
-    """Set in modules/sd_models/forge_model_reload."""
-
+    """set in modules/sd_models/forge_model_reload"""
     forge_unet_storage_dtype: "torch.dtype" = None
-    """Set in modules/sd_models/forge_model_reload."""
-
+    """set in modules/sd_models/forge_model_reload"""
     online_lora: bool = False
-    """Patch LoRAs on-the-fly."""
-
+    """patch LoRAs on-the-fly"""
     kontext: bool = False
-    """Flux Kontext."""
-
+    """Flux Kontext"""
     edit: bool = False
-    """Qwen-Image-Edit."""
-
+    """Qwen-Image-Edit"""
     nunchaku: bool = False
-    """Nunchaku (SVDQ) models."""
-
+    """Nunchaku (SVDQ) Models"""
     klein: bool = False
-    """Flux.2 Klein."""
-
+    """Flux.2 Klein"""
     wan: bool = False
-    """Wan 2.2."""
-
+    """Wan 2.2"""
+    pid: bool = False
+    """PiD"""
     ref_latents: list["torch.Tensor"] = []
-    """Reference latents for Kontext / Edit / Klein flows."""
-
+    """Reference Latent(s) for Flux Kontext / Qwen-Image-Edit / Flux.2 Klein"""
     concat_latent: "torch.Tensor" = None
-    """Input latent for Wan 2.2 I2V."""
-
+    """Input Latent for Wan 2.2 I2V"""
+    lq_latent: list["torch.Tensor", "torch.Tensor"] = [None, None]
+    """lq_latent & degrade_sigma for PiD"""
+    context_handler: "IndexListContextHandler" = None
+    """Context Handler for PiD"""
     is_referencing: bool = False
-    """ImageStitch is currently appending references."""
-
+    """Appending Reference Latent(s) (by. ImageStitch)"""
     ops: str = None
-    """Active diffusion operations backend."""
+    """Operations for the Diffusion Model"""
+    last_extra_generation_params: dict[str, str] = {}
+    """Infotext captured during `get_learned_conditioning`"""
+    loading_refiner: bool = False
+    """Do not reset when loading Refiner"""
+
+    @classmethod
+    def reset(cls):
+        if cls.loading_refiner:
+            return
+
+        cls.ref_latents.clear()
+        cls.concat_latent = None
+        cls.lq_latent = [None, None]
+        cls.context_handler = None

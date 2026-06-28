@@ -22,23 +22,27 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 
 <br>
 
-## Features [Apr.]
+## Features [Jun.]
 > Most base features of the original [Automatic1111 Webui](https://github.com/AUTOMATIC1111/stable-diffusion-webui) should still function
 
 #### New Features
 
 - [X] Support [Anima](https://huggingface.co/circlestone-labs/Anima)
 - [X] Support [Flux.2-Klein](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B)
-    - `4B` / `9B` *(**not** `FLUX.2-Dev`)*
+    - `4B` / `9B` (**not** `FLUX.2-Dev`)
 
 > [!Important]
 > To use `Flux.2-Klein` for regular `img2img`, toggle the functionality in **Settings/Stable Diffusion**
 
 - [X] Support [Ernie-Image](https://huggingface.co/baidu/ERNIE-Image)
     - `ernie-image` / `ernie-image-turbo`
+- [X] Support [PiD](https://huggingface.co/nvidia/PiD)
+    - `sdxl` / `qwen` / `flux1` / `flux2` (**not** `PixelDiT`)
+    - only `img2img` is supported currently
 - [X] Support [Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image)
     - `z-image` / `z-image-turbo`
 - [X] Support [Wan 2.2](https://github.com/Wan-Video/Wan2.2)
+    - `14B` (**not** `5B`)
     - use `Refiner` to achieve **High Noise** / **Low Noise** switching
         - enable `Refiner` in **Settings/Refiner**
 
@@ -89,19 +93,28 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 <br>
 
 - [X] Rewrite Preset System
-    - now remembers the checkpoint/module selection and parameters for each preset
+    - now save the checkpoint/module selection and parameters per each Preset
+
+> [!Note]
+> This overrides the `UI Defaults` for the controlled parameters
+
+<br>
+
+- [X] Enforce Resolution Steps
+    - dimensions must be multiples of `64` by default
+    - adjust in **Settings/System**
 - [X] Support [uv](https://github.com/astral-sh/uv) package manager
     - drastically speed up installation
-    - requires **manually** installing [uv](https://github.com/astral-sh/uv/releases)
+    - require **manually** installing [uv](https://github.com/astral-sh/uv/releases)
     - see [Commandline](#by-neo)
 - [X] Support [SageAttention](https://github.com/thu-ml/SageAttention), [FlashAttention](https://github.com/Dao-AILab/flash-attention), `fp16_accumulation`, `torch._scaled_mm`
     - see [Commandline](#by-neo)
 - [X] Implement Triton Kernel for `matmul` in `torch.int8`
-    - speed up `bf16` models
+    - speed up inference after quantization
     - enable by selecting `int8` in the `Diffusion in Low Bits`
 - [X] Implement [Radial Attention](https://github.com/mit-han-lab/radial-attention)
     - speed up `Wan 2.2`
-    - requires **manually** installing [SpargeAttn](https://github.com/thu-ml/SpargeAttn)
+    - require **manually** installing [SpargeAttn](https://github.com/thu-ml/SpargeAttn)
 - [X] Implement fast `state_dict` switching for Refiner
     - enable in **Settings/Refiner**
 - [X] Implement RescaleCFG
@@ -122,7 +135,8 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
     - see [Commandline](#by-neo)
 - [X] Implement full precision calculation for `Mask blur` blending
     - enable in **Settings/img2img**
-- [X] Support TAESD live preview for all models
+- [X] Support TAESD / TAEHV live preview for all models
+- [X] Support video previews for ExtraNetworks
 - [X] Support loading upscalers in `half` precision
     - speed up; reduce quality
     - enable in **Settings/Upscaling**
@@ -131,7 +145,9 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 - [X] Support (short) videos in **Extras** tab
 - [X] Add support for `.avif`, `.heif`, and `.jxl` image formats
 - [X] Automatically determine the optimal row count for `X/Y/Z Plot`
-- [X] Support **Union** ControlNet
+- [X] Update **LLLite** Controlnet
+    - [SDXL](https://huggingface.co/kohya-ss/controlnet-lllite/tree/main) / [Anima](https://huggingface.co/kohya-ss/Anima-LLLite/tree/main)
+- [X] Support **Union** Controlnet
     - [SDXL](https://huggingface.co/xinsir/controlnet-union-sdxl-1.0) / [Chenkin](https://civitai.com/models/2527960/chenkin-unicontrol-xl)
 
 #### Removed Features
@@ -155,6 +171,7 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 - [X] No longer `git` `clone` any repository on fresh install
 - [X] No longer install `open-clip`
 - [X] Fix memory leak when switching checkpoints
+- [X] Restore the ability to drag-and-drop images onto `gr.Image` that already contains image
 - [X] Speed up launch time
 - [X] Improve timer logs
 - [X] Remove unused `cmd_args`
@@ -163,6 +180,7 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 - [X] Remove legacy codes
 - [X] Fix some typos
 - [X] Fix automatic `Tiled VAE` fallback
+- [X] Fix `Tiling` for SD1 and SDXL
 - [X] Pad conditioning for SDXL
 - [X] Remove duplicated upscaler codes
 - [X] Update [spandrel](https://github.com/chaiNNer-org/spandrel)
@@ -180,12 +198,14 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
     - deobfuscate
     - eraser
     - hotkeys
+    - mobile friendly
 - [X] Optimize upscaler logics
 - [X] Optimize certain operations in `Spandrel`
 - [X] Optimize certain operations for `VAE`
 - [X] Speed up model loading
-- [X] Improve memory management
 - [X] Improve color correction
+- [X] Improve memory management
+- [X] Unload all models on `OutOfMemory`
 - [X] Update the implementation for `X/Y/Z Plot`
 - [X] Update the implementation for `Soft Inpainting`
 - [X] Update the implementation for `MultiDiffusion`
@@ -196,8 +216,13 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
     - update descriptions
 - [X] Check for Extension updates in parallel
 - [X] Move `embeddings` folder into `models` folder
+- [X] Infotext Rewrite
+    - allow switching Models and Modules
+    - save `emphasis` properly
+    - correct default values
 - [X] ControlNet Rewrite
     - change Units to `gr.Tab`
+    - improve `masks` & `buttons`
     - remove multi-inputs, as they are "[misleading](https://github.com/lllyasviel/stable-diffusion-webui-forge/discussions/932)"
 - [X] Disable Refiner by default
     - enable again in **Settings/Refiner**
@@ -238,24 +263,33 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 
 #### by. Neo
 
-- Add the following flags to slightly improve the model loading; in certain situations, they may cause `OutOfMemory` errors instead...
-    - `--cuda-malloc`
-    - `--cuda-stream`
-    - `--pin-shared-memory`
+- `--cuda-malloc`: Improve memory allocation
+- `--cuda-stream`: Enable async weight offloading
+- `--pin-shared-memory`: Improve RAM utilization
+- `--expandable-segments`: Enable experimental PyTorch allocator *(may prevent `OutOfMemory` errors on certain platforms)*
+
+<br>
 
 - `--uv`: Replace the `python -m pip` calls with `uv pip` to massively speed up package installation
-    - requires **uv** to be installed first *(see [Installation](#installation))*
+    - requires **uv** to be installed first *(see [Extra Installations](https://github.com/Haoming02/sd-webui-forge-classic/wiki/Extra-Installations))*
 - `--uv-symlink`: Same as above; but additionally pass `--link-mode symlink` to the commands
     - significantly reduces installation size (`~7 GB` to `~100 MB`)
+- `--uv-local-cache`: Same as above; but additionally set `UV_CACHE_DIR` to a `.uv-cache` folder within WebUI directory
+    - speed up installation on non-default drive *(**i.e.** not `C:` on Windows)*
+    - allow clean uninstallation by simply deleting the WebUI directory
 
 > [!Important]
-> Using `symlink` means it will directly access the packages from the cache folders; refrain from clearing the cache if using this option
+> `symlink` means it will directly access the packages from the cache folder instead of copying the packages over ; refrain from clearing the cache when using this option
+
+<br>
 
 - `--model-ref`: Points to a central `models` folder that contains all your models
     - said folder should contain subfolders like `Stable-diffusion`, `Lora`, `VAE`, `ESRGAN`, etc.
 
 > [!Important]
 > This simply **replaces** the `models` folder rather than adding on top of it
+
+<br>
 
 - `--forge-ref-a1111-home`: Point to an Automatic1111 installation to load its `models` folders
     - **i.e.** `Stable-diffusion`, `text_encoder`, etc.
@@ -331,7 +365,9 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 <br>
 
 > [!Tip]
-> For **Linux** and **macOS**, refer to [Wiki](https://github.com/Haoming02/sd-webui-forge-classic/wiki/Unix)
+> - For **AMD**, refer to <a href="https://github.com/CS1o/Stable-Diffusion-Info/wiki/Webui-Installation-Guides#amd-forge-neo-with-rocm"><ins>CS1o</ins> 's Guide</a>
+> - For **Linux** and **macOS**, refer to [Wiki](https://github.com/Haoming02/sd-webui-forge-classic/wiki/Unix)
+> - For **Docker** (`Nvidia`), refer to [Docker](docker/)
 
 <br>
 
@@ -369,7 +405,8 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 - **Issues** regarding **AMD** GPU will simply be ignored
 - **Issues** running non-official models will simply be ignored
     - do not just randomly download every single finetune/quant you find
-    - check the uploader and download count first
+- **Issues** about 3rd-party Extensions will simply be ignored
+    - extension should support the UI, not the other way around
 - **Issues** caused by [StabilityMatrix](https://github.com/LykosAI/StabilityMatrix) will simply be ignored
     - only open an Issue if you can reproduce it on a clean install following the official [Installation](#installation) instruction
 
@@ -380,7 +417,7 @@ The name "Forge" is inspired by "Minecraft Forge". This project aims to become t
 <hr>
 
 > [!Tip]
-> Check out the [Wiki](https://github.com/Haoming02/sd-webui-forge-classic/wiki)~
+> Check out the [Wiki](https://github.com/Haoming02/sd-webui-forge-classic/wiki) & [FAQ](https://github.com/Haoming02/sd-webui-forge-classic/issues/414)
 
 <br>
 
@@ -400,4 +437,12 @@ Buy me a <a href="https://ko-fi.com/Haoming">Coffee</a> ☕~
 <sub><i>
 <a href="https://paypal.me/hmgamingdonation">PayPal</a> me 💳~
 </i></sub>
+</p>
+
+<br>
+
+<p align="center">
+	<a href="https://www.star-history.com/?repos=Haoming02%2Fsd-webui-forge-classic&type=date&legend=top-left">
+		<img src="https://api.star-history.com/chart?repos=Haoming02/sd-webui-forge-classic&type=date&legend=top-left">
+	</a>
 </p>

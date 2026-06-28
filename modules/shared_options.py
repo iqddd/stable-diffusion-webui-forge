@@ -163,6 +163,7 @@ options_templates.update(
         ("system", "System", "system"),
         {
             "setting_allocated_vram": OptionInfo(1.0, "GPU Weights", gr.Slider, {"minimum": 0.0, "maximum": 1.0, "step": 0.05}).info("amount of VRAM that Forge can access").info("in % of total vram"),
+            "res_step": OptionInfo(64, "Resolution Step", gr.Radio, {"choices": (8, 16, 32, 64, 128, 256)}).info('"64" is recommended to prevent compatibility issues').needs_restart(),
             "auto_launch_browser": OptionInfo("Local", "Launch the webui in browser on startup", gr.Radio, {"choices": ("Disable", "Local", "Remote")}).info("Remote = always automatically start; Local = only when not sharing the server, such as <b>--share</b>"),
             "enable_console_prompts": OptionInfo(False, "Print the generation prompts to console"),
             "samples_log_stdout": OptionInfo(False, "Print the generation infotxt to console"),
@@ -173,7 +174,9 @@ options_templates.update(
             "enable_upscale_progressbar": OptionInfo(True, "Show a progress bar in the console for tiled upscaling"),
             "list_hidden_files": OptionInfo(True, "List the models/files under hidden directories").info('directory is hidden if its name starts with "."'),
             "dump_stacks_on_signal": OptionInfo(False, "Print the stack trace before terminating the webui via Ctrl + C"),
+            "confirm_leave": OptionInfo(False, "Show a browser confirmation before leaving the page"),
             "no_spellcheck": OptionInfo(False, "Disable auto-correct / spellcheck for prompt fields").needs_reload_ui(),
+            "undo_redo": OptionInfo(False, "Enable undo / redo history for prompt fields").needs_reload_ui(),
         },
     )
 )
@@ -262,7 +265,6 @@ image to and from latent space representation. Latent space is what Stable Diffu
 to create the resulting image after the sampling is finished. For img2img, VAE is additionally used to process user's input image before the sampling.
                 """),
             "sd_vae": OptionInfo("Automatic", "SD VAE", gr.Dropdown, {"choices": ("Automatic",), "interactive": False}),
-            "sd_vae_overrides_per_model_preferences": OptionInfo(True, '"SD VAE" option overrides per-model preference'),
             "sd_vae_encode_method": OptionInfo("Full", "VAE for Encoding", gr.Radio, {"choices": ("Full", "TAESD")}, infotext="VAE Encoder").info("method to encode image to latent (img2img / Hires. fix / inpaint)"),
             "sd_vae_decode_method": OptionInfo("Full", "VAE for Decoding", gr.Radio, {"choices": ("Full", "TAESD")}, infotext="VAE Decoder").info("method to decode latent to image"),
         },
@@ -425,6 +427,7 @@ options_templates.update(
             "ctrl_enter_interrupt": OptionInfo(False, "Revert [Ctrl + Enter] to only interrupt the generation").info('the current "intended" behavior is to interrupt the current generation then immediately start a new one'),
             "quicksettings_accordion": OptionInfo(False, "Place the Quicksettings under an Accordion").needs_reload_ui(),
             "quicksettings_accordion_starts_closed": OptionInfo(False, "Close the Accordion on startup").info("for the above option").needs_reload_ui(),
+            "remove_image_on_hover": OptionInfo(True, "For image inputs in Extras and PNG Info, remove the current image when dragging another image over it").info("allow you to drag-and-drop images onto the input similar to AUTOMATIC1111 behavior").needs_reload_ui(),
             "forbidden_knowledge": OptionInfo(False, "Forbidden Knowledge").info('replace "<b>DPM++ 2s a RF</b>" with "<b>Flux Realistic</b>"').needs_restart(),
             "div_prompt": OptionDiv(),
             "prompt_box_style": OptionInfo("Default", "Prompt Layout", gr.Radio, {"choices": ("Default", "Compact", "Scrollable", "Accordion")}).html(f"""
@@ -462,6 +465,8 @@ options_templates.update(
             "send_seed": OptionInfo(True, 'Send the Seed information when using the "Send to" buttons'),
             "send_cfg": OptionInfo(True, 'Send the CFG information when using the "Send to" buttons'),
             "send_size": OptionInfo(True, 'Send the Resolution information when using the "Send to" buttons'),
+            "send_image_info_not_ui": OptionInfo(False, 'Send the Parameters in the infotext instead of the UI fields when using the "Send to" buttons').info("<b>e.g.</b> send the result of Wildcards instead of the syntax").needs_reload_ui(),
+            "allow_i2i_send_info": OptionInfo(False, 'Send the Parameters too when using the "Send to" buttons in img2img tab').info("otherwise only the image is sent").needs_reload_ui(),
             "enable_reloading_ui_scripts": OptionInfo(False, 'Additionally reload the "modules.ui" scripts when using "Reload UI"').info("for developing"),
         },
     )
@@ -476,10 +481,10 @@ options_templates.update(
             "save_txt": OptionInfo(False, "Write infotext to a text file next to every generated image"),
             "add_model_name_to_info": OptionInfo(True, "Add model name to infotext"),
             "add_model_hash_to_info": OptionInfo(True, "Add model hash to infotext"),
-            "add_vae_name_to_info": OptionInfo(True, "Add VAE name to infotext"),
-            "add_vae_hash_to_info": OptionInfo(True, "Add VAE hash to infotext"),
             "add_user_name_to_info": OptionInfo(False, "Add user name to infotext when authenticated"),
             "add_version_to_infotext": OptionInfo(True, "Add webui version to infotext"),
+            "disable_weights_auto_swap": OptionInfo(True, "Ignore the Checkpoint when reading infotext"),
+            "disable_modules_auto_swap": OptionInfo(True, "Ignore the VAE / Text Encoder when reading infotext"),
             "infotext_skip_pasting": OptionInfo([], "Ignore fields when reading infotext", ui_components.DropdownMulti, lambda: {"choices": shared_items.get_infotext_names()}),
             "infotext_styles": OptionInfo("Apply if any", "Infer Styles when reading infotext", gr.Radio, {"choices": ("Ignore", "Apply", "Apply if any", "Discard")}).html("""
 <ul style='margin-left: 1.5em'>
@@ -522,6 +527,7 @@ options_templates.update(
         ("sampler-params", "Sampler Parameters", "sd"),
         {
             "hide_samplers": OptionInfo([], "Hide Samplers", ui_components.DropdownMulti, lambda: {"choices": [x.name for x in shared_items.list_samplers()]}).needs_reload_ui(),
+            "hide_schedulers": OptionInfo([], "Hide Schedulers", ui_components.DropdownMulti, lambda: {"choices": shared_items.list_schedulers()}).needs_restart(),
         },
     )
 )

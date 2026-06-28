@@ -23,10 +23,6 @@ def has_mps() -> bool:
     return memory_management.is_device_mps(device)
 
 
-def cuda_no_autocast(device_id=None) -> bool:
-    return False
-
-
 def get_cuda_device_id() -> int:
     return device.index
 
@@ -51,35 +47,6 @@ def torch_gc():
     memory_management.soft_empty_cache()
 
 
-def torch_npu_set_device():
-    return
-
-
-def enable_tf32():
-    return
-
-
-def cond_cast_unet(input):
-    return input
-
-
-def cond_cast_float(input):
-    return input
-
-
-nv_rng = None
-patch_module_list = []
-
-
-def manual_cast_forward(target_dtype):
-    return
-
-
-@contextlib.contextmanager
-def manual_cast(target_dtype):
-    return
-
-
 def autocast(*args, **kwargs):
     return contextlib.nullcontext()
 
@@ -97,7 +64,3 @@ def test_for_nans(x: torch.Tensor, *args, **kwargs):
         memory_management.logger.warning("Encountered NaN in Latent" + ("; Try --disable-sage" if memory_management.sage_enabled() else ""))
         x.nan_to_num_(nan=0.0, posinf=1.0, neginf=0.0)
         # raise NansException
-
-
-def first_time_calculation():
-    return

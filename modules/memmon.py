@@ -7,6 +7,8 @@ from backend import memory_management
 
 from backend import memory_management
 
+from backend import memory_management
+
 
 class MemUsageMonitor(threading.Thread):
     run_flag = None

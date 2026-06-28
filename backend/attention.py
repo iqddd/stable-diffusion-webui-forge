@@ -20,56 +20,42 @@ if memory_management.xformers_enabled() or memory_management.xformers_enabled_va
     import xformers.ops
 
 
-sage_attn_hnd = None
-sage_attn_nhd = None
-
 if memory_management.sage_enabled():
     import importlib.metadata
 
+    IS_SAGE_3 = False
+
     if importlib.metadata.version("sageattention").startswith("1"):
-        IS_SAGE_2 = False
+        IS_SAGE_1 = True
         from sageattention import sageattn
     else:
-        IS_SAGE_2 = True
+        IS_SAGE_1 = False
+        from functools import partial
+
+        import sageattention
+
         from backend.args import SageAttentionFuncs
 
-        if args.sage2_function is SageAttentionFuncs.auto:
-            from sageattention import sageattn
-        else:
+        match args.sage_function:
+            case SageAttentionFuncs.auto:
+                sageattn = sageattention.sageattn
+            case SageAttentionFuncs.fp16_triton:
+                sageattn = sageattention.sageattn_qk_int8_pv_fp16_triton
+            case SageAttentionFuncs.fp16_cuda:
+                sageattn = partial(sageattention.sageattn_qk_int8_pv_fp16_cuda, pv_accum_dtype="fp32")
+            case SageAttentionFuncs.fp8_cuda:
+                sageattn = partial(sageattention.sageattn_qk_int8_pv_fp8_cuda, pv_accum_dtype="fp32+fp32")
+            case SageAttentionFuncs.fp8_cuda_pp:
+                sageattn = partial(sageattention.sageattn_qk_int8_pv_fp8_cuda, pv_accum_dtype="fp32+fp16")
+            case SageAttentionFuncs.sageattn3:
+                from sageattn3 import sageattn3_blackwell
 
-            from functools import partial
+                IS_SAGE_3 = True
 
-            import sageattention
-
-            _function = getattr(sageattention, f"sageattn_qk_int8_pv_{args.sage2_function.value}")
-            if args.sage2_function is SageAttentionFuncs.fp16_triton:
-                sageattn = partial(_function, quantization_backend=args.sage_quantization_backend.value)
-            else:
-                sageattn = partial(_function, qk_quant_gran=args.sage_quant_gran.value, pv_accum_dtype=args.sage_accum_dtype.value)
-
-    sage_attn_hnd = None
-    sage_attn_nhd = None
-    try:
-        # Keep SageAttention as a custom op for torch.compile to avoid tracing third-party Python internals.
-        @torch.library.custom_op("sage_attention::sage_attn_hnd", mutates_args=())
-        def sage_attn_hnd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-            return sageattn(q, k, v, tensor_layout="HND", is_causal=False)
-
-        @sage_attn_hnd.register_fake
-        def sage_attn_hnd_fake(q, k, v):
-            return q.new_empty(q.shape)
-
-        @torch.library.custom_op("sage_attention::sage_attn_nhd", mutates_args=())
-        def sage_attn_nhd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-            return sageattn(q, k, v, tensor_layout="NHD", is_causal=False)
-
-        @sage_attn_nhd.register_fake
-        def sage_attn_nhd_fake(q, k, v):
-            return q.new_empty(q.shape)
-    except Exception:
-        # Fall back to direct SageAttention call path when custom op registration is unavailable.
-        sage_attn_hnd = None
-        sage_attn_nhd = None
+                def sageattn(q, k, v, attn_mask=None, is_causal=False, tensor_layout="NHD"):
+                    q, k, v = [x.transpose(1, 2) if tensor_layout == "NHD" else x for x in (q, k, v)]
+                    out = sageattn3_blackwell(q, k, v, is_causal=is_causal, attn_mask=attn_mask)
+                    return out.transpose(1, 2) if tensor_layout == "NHD" else out
 
 
 if memory_management.flash_enabled():
@@ -157,6 +143,7 @@ def attention_basic(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
     return out
 
 
+@torch.compiler.disable
 def attention_xformers(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
     b = q.shape[0]
     dim_head = q.shape[-1]
@@ -249,6 +236,10 @@ def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_resha
 
 @torch.compiler.disable
 def attention_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    in_dtype = v.dtype
+    if torch.float32 in (q.dtype, k.dtype, v.dtype):
+        q, k, v = q.to(torch.float16), k.to(torch.float16), v.to(torch.float16)
+
     if skip_reshape:
         b, _, _, dim_head = q.shape
         tensor_layout = "HND"
@@ -267,16 +258,11 @@ def attention_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=
         if mask.ndim == 3:
             mask = mask.unsqueeze(1)
 
-    _fallback: bool = (IS_SAGE_2 and dim_head > 128) or ((not IS_SAGE_2) and (dim_head not in (64, 96, 128)))
+    _fallback: bool = ((not IS_SAGE_1) and dim_head > 128) or (IS_SAGE_1 and (dim_head not in (64, 96, 128)))
 
     try:
         if not _fallback:
-            if mask is None and tensor_layout == "HND" and sage_attn_hnd is not None:
-                out = sage_attn_hnd(q, k, v)
-            elif mask is None and tensor_layout == "NHD" and sage_attn_nhd is not None:
-                out = sage_attn_nhd(q, k, v)
-            else:
-                out = sageattn(q, k, v, attn_mask=mask, is_causal=False, tensor_layout=tensor_layout)
+            out = sageattn(q, k, v, attn_mask=mask, is_causal=False, tensor_layout=tensor_layout).to(in_dtype)
     except Exception as e:
         logger.error(f"Error running sageattn: {e}")
         _fallback = True
@@ -301,6 +287,7 @@ def attention_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=
     return out
 
 
+@torch.compiler.disable
 def attention_flash(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
     if skip_reshape:
         b, _, _, dim_head = q.shape
@@ -343,18 +330,22 @@ def attention_flash(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
 
 if memory_management.sage_enabled():
     attention_function = attention_sage
-    if not IS_SAGE_2:
+    if IS_SAGE_1:
         logger.info("Using SageAttention")
+    elif IS_SAGE_3:
+        logger.info("Using SageAttention 3")
     else:
-        match args.sage2_function:
+        match args.sage_function:
             case SageAttentionFuncs.auto:
                 logger.info("Using SageAttention 2")
             case SageAttentionFuncs.fp16_triton:
-                logger.info("Using SageAttention (fp16 Triton)")
+                logger.info("Using SageAttention 2 (fp16 Triton)")
             case SageAttentionFuncs.fp16_cuda:
-                logger.info("Using SageAttention (fp16 CUDA)")
+                logger.info("Using SageAttention 2 (fp16 CUDA)")
             case SageAttentionFuncs.fp8_cuda:
-                logger.info("Using SageAttention (fp8 CUDA)")
+                logger.info("Using SageAttention 2 (fp8 CUDA)")
+            case SageAttentionFuncs.fp8_cuda_pp:
+                logger.info("Using SageAttention 2 (fp8 CUDA ++)")
 
 elif memory_management.flash_enabled():
     logger.info("Using FlashAttention")
@@ -400,12 +391,15 @@ def slice_attention_vae(q, k, v):
                 r1[:, :, i:end] = torch.bmm(v, s2)
                 del s2
             break
-        except memory_management.OOM_EXCEPTION as e:
-            memory_management.soft_empty_cache(True)
-            steps *= 2
+        except Exception as e:
+            if not memory_management.is_oom(e):
+                raise e
             if steps > 128:
                 raise e
-            logger.warning(f"Out of Memory Error; trying again... ({steps})")
+
+        logger.warning("Out of Memory Error; retrying with higher steps...")
+        memory_management.soft_empty_cache()
+        steps *= 2
 
     return r1
 
@@ -461,11 +455,14 @@ def pytorch_attention_vae(q, k, v):
         out = operations.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
         out = out.transpose(2, 3).reshape(orig_shape)
         _fallback = False
-    except memory_management.OOM_EXCEPTION:
+    except Exception as e:
+        if not memory_management.is_oom(e):
+            raise e
         logger.warning("Out of Memory Error; retrying with Slice Attention")
         _fallback = True
 
     if _fallback:
+        memory_management.soft_empty_cache()
         out = slice_attention_vae(q.view(B, -1, C), k.view(B, -1, C).transpose(1, 2), v.view(B, -1, C).transpose(1, 2)).reshape(orig_shape)
 
     return out

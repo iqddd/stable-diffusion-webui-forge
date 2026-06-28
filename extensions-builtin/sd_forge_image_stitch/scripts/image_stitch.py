@@ -26,7 +26,7 @@ For <b>Wan 2.2 I2V</b>: Use in <b>img2img</b> to set as the Last Frame to achiev
 
 class ImageStitch(scripts.Script):
     sorting_priority = 529
-    cached_parameters: list[str | int | bool] = None
+    cached_parameters: list[int] = None
 
     def title(self):
         return "ImageStitch Integrated"
@@ -95,7 +95,7 @@ class ImageStitch(scripts.Script):
         def _upload(gallery: list[tuple[Image.Image, str]], image: Image.Image):
             if not image:
                 return [gr.skip(), gr.skip()]
-            if not gallery:
+            elif not gallery:
                 gallery = [(image, None)]
             else:
                 gallery.append((image, None))
@@ -157,29 +157,27 @@ class ImageStitch(scripts.Script):
             if ImageStitch.cached_parameters is None:
                 return
 
+            # if previously enabled, clear out the ref_latents
             ImageStitch.cached_parameters = None
             self.reset_references(p)
             return
 
         references = self.extract_images(references)
 
-        # Cache depends on the active model, references, and Wan's txt2img-specific path.
-        cache: list[str | int | bool] = [
-            str(sd_models.model_data.forge_loading_parameters),
-            *(self.hash_image(ref) for ref in references),
-            dynamic_args.wan and isinstance(p, StableDiffusionProcessingTxt2Img),
-        ]
+        # cache is based on reference inputs & model
+        cache: list[str | int | bool] = [str(sd_models.model_data.forge_loading_parameters), *(self.hash_image(ref) for ref in references), (dynamic_args.wan and isinstance(p, StableDiffusionProcessingTxt2Img))]
         if ImageStitch.cached_parameters == cache:
             return
 
         ImageStitch.cached_parameters = cache
         self.reset_references(p)
 
-        batch_size = None
+        _batch_size: int = None
+
         if dynamic_args.wan:
             if isinstance(p, StableDiffusionProcessingTxt2Img):
-                batch_size = p.batch_size
-                if batch_size == 1:
+                _batch_size = p.batch_size
+                if _batch_size == 1:
                     logger.error("Wan 2.2 requires more than one frame...")
                     return
             if len(references) > 1:
@@ -190,15 +188,15 @@ class ImageStitch(scripts.Script):
 
         for reference in references:
             reference = self.preprocess(reference, max_dim)
-            if batch_size:
+            if _batch_size:
                 reference = images.resize_image(1, reference, p.width, p.height)
             image = images.flatten(reference, opts.img2img_background_color)
             image = np.array(image, dtype=np.float32) / 255.0
             image = np.moveaxis(image, 2, 0)
-            image = torch.from_numpy(image).to(device=device, dtype=torch.float32).unsqueeze(0)
+            image = torch.from_numpy(image).to(device=device).unsqueeze(0)
 
-            if batch_size:
-                dim = [batch_size - 1] + list(image.shape)[1:]
+            if _batch_size:
+                dim = [_batch_size - 1] + list(image.shape)[1:]
                 empty = torch.empty(dim, dtype=torch.float32, device=device)
                 image = torch.cat([image, empty], dim=0)
 
@@ -218,17 +216,18 @@ class ImageStitch(scripts.Script):
 
         if limit > 0 and max(w, h) > limit:
             ratio = limit / max(w, h)
-            new_w, new_h = int(w * ratio), int(h * ratio)
+            _w, _h = int(w * ratio), int(h * ratio)
         else:
-            new_w, new_h = w, h
+            _w, _h = w, h
 
-        if new_w % 64 != 0 or new_h % 64 != 0:
-            new_w = round(new_w / 64) * 64
-            new_h = round(new_h / 64) * 64
+        if _w % 64 != 0 or _h % 64 != 0:
+            _w = round(_w / 64) * 64
+            _h = round(_h / 64) * 64
 
-        if w != new_w or h != new_h:
-            return images.resize_image(1, img, new_w, new_h)
-        return img
+        if w != _w or h != _h:
+            return images.resize_image(1, img, _w, _h)
+        else:
+            return img
 
     @staticmethod
     def hash_image(img: Image.Image) -> int:

@@ -110,10 +110,6 @@ if args.directml is not None:
     logger.info("Using directml with device: {}".format(torch_directml.device_name(device_index)))
     lowvram_available = False
 
-try:
-    import intel_extension_for_pytorch as ipex  # noqa: F401
-except Exception:
-    ipex = None
 
 try:
     _ = torch.xpu.device_count()
@@ -200,6 +196,17 @@ except Exception:
     pass
 
 OOM_EXCEPTION = getattr(torch, "OutOfMemoryError", Exception)
+ACCELERATOR_ERROR = getattr(torch, "AcceleratorError", RuntimeError)
+
+
+def is_oom(e: Exception) -> bool:
+    if isinstance(e, OOM_EXCEPTION):
+        return True
+    if isinstance(e, ACCELERATOR_ERROR) or "out of memory" in str(e).lower():
+        discard_cuda_async_error()
+        return True
+    return False
+
 
 if args.disable_xformers:
     XFORMERS_IS_AVAILABLE = False
@@ -240,13 +247,6 @@ except Exception:
     BNB_IS_AVAILABLE = False
 else:
     BNB_IS_AVAILABLE = True
-
-try:
-    import comfy_kitchen  # noqa: F401
-except Exception:
-    CK_IS_AVAILABLE = False
-else:
-    CK_IS_AVAILABLE = True
 
 
 def amd_min_version(device: torch.device = None, min_rdna_version: int = 0) -> bool:
@@ -484,13 +484,6 @@ class LoadedModel:
         self.model_use_more_vram(use_more_vram, force_patch_weights=force_patch_weights)
 
         real_model = self.model.model
-
-        if is_intel_xpu() and not args.disable_ipex_optimize and ipex is not None and real_model is not None:
-            with torch.no_grad():
-                real_model = ipex.optimize(real_model.eval(), inplace=True, graph_mode=True, concat_linear=True)
-
-            global signal_empty_cache
-            signal_empty_cache = True
 
         bake_gguf_model(real_model)
 
@@ -845,7 +838,7 @@ def unet_dtype(device: torch.device = None, model_params: int = 0, supported_dty
     return torch.float32
 
 
-def inference_cast(weight_dtype: torch.device, inference_device: torch.device, supported_dtypes: list[torch.dtype] = [torch.float16, torch.bfloat16, torch.float32]) -> torch.dtype:
+def inference_cast(weight_dtype: torch.dtype, inference_device: torch.device, supported_dtypes: list[torch.dtype] = [torch.float16, torch.bfloat16, torch.float32]) -> torch.dtype:
     if weight_dtype == torch.float32:
         return weight_dtype
 
@@ -1070,10 +1063,6 @@ def bnb_enabled() -> bool:
     return BNB_IS_AVAILABLE
 
 
-def ck_enabled() -> bool:
-    return CK_IS_AVAILABLE
-
-
 def pytorch_attention_enabled() -> bool:
     return ENABLE_PYTORCH_ATTENTION
 
@@ -1186,10 +1175,7 @@ def should_use_fp16(device: torch.device = None, model_params: int = 0, prioriti
         return False
 
     if is_intel_xpu():
-        if torch_version_numeric < (2, 3):
-            return True
-        else:
-            return torch.xpu.get_device_properties(device).has_fp16
+        return torch.xpu.get_device_properties(device).has_fp16
 
     if torch.version.hip:
         return True
@@ -1244,10 +1230,7 @@ def should_use_bf16(device: torch.device = None, model_params: int = 0, prioriti
         return False
 
     if is_intel_xpu():
-        if torch_version_numeric < (2, 3):
-            return True
-        else:
-            return torch.xpu.is_bf16_supported()
+        return torch.xpu.is_bf16_supported()
 
     if is_amd():
         arch = torch.cuda.get_device_properties(device).gcnArchName
@@ -1361,8 +1344,10 @@ def soft_empty_cache(force=False):
     if cpu_state is CPUState.MPS:
         torch.mps.empty_cache()
     elif is_intel_xpu():
+        torch.xpu.synchronize()
         torch.xpu.empty_cache()
     elif torch.cuda.is_available():
+        torch.cuda.synchronize()
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
 

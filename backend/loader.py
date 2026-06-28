@@ -20,6 +20,7 @@ from backend.diffusion_engine.flux import Flux
 from backend.diffusion_engine.flux2 import Flux2
 from backend.diffusion_engine.lumina import Lumina2
 from backend.diffusion_engine.mugen import Mugen
+from backend.diffusion_engine.pid import PiD
 from backend.diffusion_engine.qwen import QwenImage
 from backend.diffusion_engine.sd15 import StableDiffusion
 from backend.diffusion_engine.sdxl import StableDiffusionXL, StableDiffusionXLRefiner
@@ -41,7 +42,7 @@ from backend.utils import (
 )
 from modules_forge.packages.comfy.utils import convert_diffusers_mmdit
 
-possible_models: tuple[type["ForgeDiffusionEngine"], ...] = (StableDiffusion, StableDiffusionXLRefiner, StableDiffusionXL, Mugen, Chroma, Flux, Flux2, Wan, QwenImage, Lumina2, ZImage, Anima, ErnieImage)
+possible_models: tuple["ForgeDiffusionEngine"] = (StableDiffusion, StableDiffusionXLRefiner, StableDiffusionXL, Mugen, Chroma, Flux, Flux2, Wan, QwenImage, Lumina2, ZImage, Anima, ErnieImage, PiD)
 
 logger = logging.getLogger("loader")
 setup_logger(logger)
@@ -64,6 +65,29 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
             comp = cls.from_pretrained(os.path.join(repo_path, component_name))
             comp._eventual_warn_about_too_long_sequence = lambda *args, **kwargs: None
             return comp
+
+        # region VAE
+
+        if cls_name == "PiDAutoVAE":
+            assert isinstance(state_dict, dict) and len(state_dict) > 16, "You do not have VAE state dict!"
+            _dim: int = state_dict.pop("_dim")
+
+            if _dim == 4:
+                cls_name = "AutoencoderKL"
+                config_path = os.path.join(HF, "stabilityai", "stable-diffusion-xl-base-1.0", "vae_1_0")
+            elif _dim == 128:
+                cls_name = "AutoencoderKLFlux2"
+                config_path = os.path.join(HF, "black-forest-labs", "FLUX.2-klein-9B", "vae")
+            elif _dim == 16:
+                if "decoder.middle.0.residual.0.gamma" in state_dict:
+                    cls_name = "AutoencoderKLQwenImage"
+                    config_path = os.path.join(HF, "Qwen", "Qwen-Image", "vae")
+                else:
+                    cls_name = "AutoencoderKL"
+                    config_path = os.path.join(HF, "black-forest-labs", "FLUX.1-dev", "vae")
+            else:
+                raise NotImplementedError
+
         if cls_name == "AutoencoderKL":
             assert isinstance(state_dict, dict) and len(state_dict) > 16, "You do not have VAE state dict!"
             from backend.nn.vae import IntegratedAutoencoderKL
@@ -82,12 +106,8 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
             config = AutoencoderKLFlux2.load_config(config_path)
 
-            decoder_conv_in = state_dict.get("decoder.conv_in.weight")
-            if decoder_conv_in is not None:
-                ch_mult = config["block_out_channels"][-1] // config["block_out_channels"][0]
-                decoder_base_channels = int(decoder_conv_in.shape[0] // ch_mult)
-                if decoder_base_channels != config["block_out_channels"][0]:
-                    config["dch"] = decoder_base_channels
+            if int(state_dict["decoder.conv_in.weight"].shape[0]) == 384:  # Small Decoder
+                config["dch"] = 96
 
             with no_init_weights():
                 with using_forge_operations(device=memory_management.cpu, dtype=memory_management.vae_dtype(), bnb_dtype="vae"):
@@ -97,10 +117,12 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
             return model
         if cls_name in ["AutoencoderKLWan", "AutoencoderKLQwenImage"]:
             assert isinstance(state_dict, dict) and len(state_dict) > 16, "You do not have VAE state dict!"
-            if "post_quant_conv.weight" in state_dict:
+
+            if "post_quant_conv.weight" in state_dict:  # 2D
                 from backend.nn.wan_vae_2d import Qwen2DVAE as WanVAE
 
                 config = {}
+
             else:
                 from backend.nn.wan_vae import WanVAE
 
@@ -112,6 +134,9 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
             load_state_dict(model, state_dict)
             return model
+
+        # region Text Encoder
+
         if component_name.startswith("text_encoder") and cls_name in ["CLIPTextModel", "CLIPTextModelWithProjection"]:
             assert isinstance(state_dict, dict) and len(state_dict) > 16, "You do not have CLIP state dict!"
             from transformers import CLIPTextConfig, CLIPTextModel
@@ -313,7 +338,10 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
             load_state_dict(model, state_dict, log_name=cls_name, ignore_errors=["transformer.encoder.embed_tokens.weight", "logit_scale"])
             return model
-        if cls_name in ["UNet2DConditionModel", "FluxTransformer2DModel", "Flux2Transformer2DModel", "ChromaTransformer2DModel", "WanTransformer3DModel", "QwenImageTransformer2DModel", "Lumina2Transformer2DModel", "ZImageTransformer2DModel", "CosmosTransformer3DModel", "ErnieImageTransformer2DModel"]:
+
+        # region UNet / DiT
+
+        if cls_name in ["UNet2DConditionModel", "FluxTransformer2DModel", "Flux2Transformer2DModel", "ChromaTransformer2DModel", "WanTransformer3DModel", "QwenImageTransformer2DModel", "Lumina2Transformer2DModel", "ZImageTransformer2DModel", "CosmosTransformer3DModel", "ErnieImageTransformer2DModel", "PiDTransformer2DModel"]:
             assert isinstance(state_dict, dict) and len(state_dict) > 16, "You do not have model state dict!"
             pre_func: Callable[[torch.nn.Module], torch.nn.Module] = lambda mdl: mdl
             model_loader = None
@@ -371,6 +399,10 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
                 from backend.nn.ernie import ErnieImageModel
 
                 model_loader = lambda c: ErnieImageModel(**c)
+            elif cls_name == "PiDTransformer2DModel":
+                from backend.nn.pixeldit.pid import PidNet
+
+                model_loader = lambda c: PidNet(**c)
 
             load_device = memory_management.get_torch_device()
             offload_device = memory_management.unet_offload_device()
@@ -492,10 +524,8 @@ def replace_state_dict(sd: dict[str, torch.Tensor], asd: dict[str, torch.Tensor]
             sd[vae_key_prefix + k] = v
 
     ##  identify model type
-    flux_test_keys = (
-        "model.diffusion_model.double_blocks.0.img_attn.norm.key_norm.scale",
-        "model.diffusion_model.double_blocks.0.img_attn.norm.key_norm.weight",
-    )
+    flux_test_key = "model.diffusion_model.double_blocks.0.img_attn.norm.key_norm.scale"
+    flux_test_key_weight = "model.diffusion_model.double_blocks.0.img_attn.norm.key_norm.weight"
     svdq_test_key = "model.diffusion_model.single_transformer_blocks.0.mlp_fc1.qweight"
     legacy_test_key = "model.diffusion_model.input_blocks.4.1.transformer_blocks.0.attn2.to_k.weight"
 
@@ -508,7 +538,7 @@ def replace_state_dict(sd: dict[str, torch.Tensor], asd: dict[str, torch.Tensor]
                 model_type = "xlrf"  # sdxl refiner model
             case 2048:
                 model_type = "sdxl"
-    elif any(k in sd for k in flux_test_keys) or svdq_test_key in sd:
+    elif flux_test_key in sd or flux_test_key_weight in sd or svdq_test_key in sd:
         model_type = "flux"
 
     ##  prefixes used by various model types for CLIP-L
@@ -725,6 +755,32 @@ def process_anima(dit: dict[str, torch.Tensor], enc: dict[str, torch.Tensor]):
             enc[k] = dit.pop(k)
 
 
+def process_pid(state_dict: dict[str, torch.Tensor]):
+    pixel_dim = next(v for k, v in state_dict.items() if k.endswith("pixel_embedder.proj.weight")).shape[0]
+    marker = ".adaLN_modulation.0."
+
+    out = {}
+    for k, v in state_dict.items():
+        if k.startswith("_repa_projector") or k.startswith("net_ema."):
+            continue
+        if k.startswith("core."):
+            k = k[len("core.") :]
+        elif k.startswith("net."):
+            k = k[len("net.") :]
+        if "pixel_blocks." in k and marker in k:
+            p2 = v.shape[0] // (6 * pixel_dim)
+            trail = v.shape[1:]
+            vv = v.view(p2, 6, pixel_dim, *trail)
+            base, suffix = k.split(marker)
+            out[f"{base}.adaLN_modulation_msa.{suffix}"] = vv[:, 0:3].reshape(3 * p2 * pixel_dim, *trail).contiguous()
+            out[f"{base}.adaLN_modulation_mlp.{suffix}"] = vv[:, 3:6].reshape(3 * p2 * pixel_dim, *trail).contiguous()
+        else:
+            out[k] = v
+
+    state_dict.clear()
+    state_dict.update(out)
+
+
 def _load_unet(path: os.PathLike):
     import huggingface_guess
 
@@ -741,7 +797,8 @@ def _load_diffuser(path: os.PathLike):
 
     sd, metadata = load_torch_file(path, return_metadata=True)
     sd, metadata = convert_quantization(sd, metadata)
-    sd = convert_diffusers_mmdit(sd, "")
+    if (sd := convert_diffusers_mmdit(sd, "")) is None:
+        raise ModuleNotFoundError("Failed to recognize model...")
     sd = preprocess_state_dict(sd)
     guess = huggingface_guess.guess(sd)
 
@@ -751,7 +808,7 @@ def _load_diffuser(path: os.PathLike):
 def split_state_dict(path: os.PathLike, additional_state_dicts: list[os.PathLike] = None):
     try:
         sd, metadata, guess = _load_unet(path)
-    except Exception:
+    except ModuleNotFoundError:
         sd, metadata, guess = _load_diffuser(path)
     finally:
         memory_management.soft_empty_cache()
@@ -793,6 +850,9 @@ def split_state_dict(path: os.PathLike, additional_state_dicts: list[os.PathLike
 
     if "Anima" in guess.huggingface_repo:
         process_anima(state_dict["transformer"], state_dict["text_encoder"])
+    if "PiD" in guess.huggingface_repo:
+        process_pid(state_dict["transformer"])
+        state_dict["vae"]["_dim"] = guess.unet_config["lq_latent_channels"]
 
     print_dict = {k: len(v) for k, v in state_dict.items()}
     logger.debug(f"StateDict Keys: {print_dict}")
@@ -804,18 +864,16 @@ def split_state_dict(path: os.PathLike, additional_state_dicts: list[os.PathLike
 
 @torch.inference_mode()
 def forge_loader(sd: os.PathLike, additional_state_dicts: list[os.PathLike] = None) -> "ForgeDiffusionEngine":
-    try:
-        state_dicts, estimated_config = split_state_dict(sd, additional_state_dicts=additional_state_dicts)
-    except AttributeError:
-        raise ValueError("Failed to recognize model...") from None
+    state_dicts, estimated_config = split_state_dict(sd, additional_state_dicts=additional_state_dicts)
+    repo_name: str = estimated_config.huggingface_repo
 
-    repo_name = estimated_config.huggingface_repo
-
+    backend.args.dynamic_args.reset()
     backend.args.dynamic_args.kontext = "kontext" in str(sd).lower()
     backend.args.dynamic_args.edit = "qwen" in str(sd).lower() and "edit" in str(sd).lower()
     backend.args.dynamic_args.nunchaku = getattr(estimated_config, "nunchaku", False)
     backend.args.dynamic_args.klein = "klein" in repo_name
     backend.args.dynamic_args.wan = "Wan" in repo_name
+    backend.args.dynamic_args.pid = "PiD" in repo_name
 
     if "xl" in repo_name and "rectified" in str(sd).lower():
         estimated_config.sampling_settings["RF"] = True
@@ -873,4 +931,4 @@ def forge_loader(sd: os.PathLike, additional_state_dicts: list[os.PathLike] = No
         if any(type(estimated_config) is x for x in M.matched_guesses):
             return M(estimated_config=estimated_config, huggingface_components=huggingface_components)
 
-    raise ValueError("Failed to recognize model...") from None
+    raise ModuleNotFoundError("Failed to recognize model...")

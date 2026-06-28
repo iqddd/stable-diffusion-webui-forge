@@ -1,4 +1,4 @@
-# reference: https://github.com/Comfy-Org/ComfyUI/blob/v0.11.0/comfy/model_detection.py
+# reference: https://github.com/Comfy-Org/ComfyUI/blob/v0.24.1/comfy/model_detection.py
 
 import logging
 
@@ -106,7 +106,7 @@ def detect_unet_config(state_dict: dict, key_prefix: str) -> dict:
     if "{}single_transformer_blocks.0.mlp_fc1.qweight".format(key_prefix) in state_dict_keys:  # SVDQ Flux
         dit_config = {"nunchaku": True}
         dit_config["image_model"] = "flux"
-        dit_config["guidance_embed"] = True
+        dit_config["guidance_embed"] = "{}time_text_embed.guidance_embedder.linear_1.weight".format(key_prefix) in state_dict_keys
         return dit_config
 
     if "{}double_blocks.0.img_attn.proj.weight.quant_state.bitsandbytes__nf4".format(key_prefix) in state_dict_keys:  # flux1-dev-bnb-nf4
@@ -125,14 +125,10 @@ def detect_unet_config(state_dict: dict, key_prefix: str) -> dict:
         dit_config["theta"] = 10000
         dit_config["patch_size"] = 2
         dit_config["qkv_bias"] = True
-        dit_config["guidance_embed"] = True
+        dit_config["guidance_embed"] = "{}guidance_in.in_layer.weight".format(key_prefix) in state_dict_keys
         return dit_config
 
-    flux_qk_norm_keys = (
-        "{}double_blocks.0.img_attn.norm.key_norm.scale".format(key_prefix),
-        "{}double_blocks.0.img_attn.norm.key_norm.weight".format(key_prefix),
-    )
-    if any(k in state_dict_keys for k in flux_qk_norm_keys) and ("{}img_in.weight".format(key_prefix) in state_dict_keys or f"{key_prefix}distilled_guidance_layer.norms.0.scale" in state_dict_keys):  # Flux.1 / Flux.2
+    if ("{}double_blocks.0.img_attn.norm.key_norm.scale".format(key_prefix) in state_dict_keys or "{}double_blocks.0.img_attn.norm.key_norm.weight".format(key_prefix) in state_dict_keys) and ("{}img_in.weight".format(key_prefix) in state_dict_keys or f"{key_prefix}distilled_guidance_layer.norms.0.scale" in state_dict_keys):  # Flux.1 / Flux.2
         dit_config = {}
         if "{}double_stream_modulation_img.lin.weight".format(key_prefix) in state_dict_keys:
             dit_config["image_model"] = "flux2"
@@ -198,10 +194,7 @@ def detect_unet_config(state_dict: dict, key_prefix: str) -> dict:
         else:
             dit_config["guidance_embed"] = "{}guidance_in.in_layer.weight".format(key_prefix) in state_dict_keys
             dit_config["yak_mlp"] = "{}double_blocks.0.img_mlp.gate_proj.weight".format(key_prefix) in state_dict_keys
-            dit_config["txt_norm"] = (
-                "{}txt_norm.scale".format(key_prefix) in state_dict_keys
-                or "{}txt_norm.weight".format(key_prefix) in state_dict_keys
-            )
+            dit_config["txt_norm"] = "{}txt_norm.scale".format(key_prefix) in state_dict_keys
 
         return dit_config
 
@@ -225,6 +218,17 @@ def detect_unet_config(state_dict: dict, key_prefix: str) -> dict:
         dit_config["rope_w_extrapolation_ratio"] = 4.0
         dit_config["rope_t_extrapolation_ratio"] = 1.0
 
+        return dit_config
+
+    if (_lq_w_key := "{}lq_proj.latent_proj.0.weight".format(key_prefix)) in state_dict_keys:  # PiD
+        _gate_prefix = "{}lq_proj.gate_modules.".format(key_prefix)
+        num_gates = len({k[len(_gate_prefix) :].split(".")[0] for k in state_dict_keys if k.startswith(_gate_prefix)})
+        in_ch = int(state_dict[_lq_w_key].shape[1])
+        dit_config = {"image_model": "pid"}
+        dit_config["lq_latent_channels"] = in_ch
+        dit_config["latent_spatial_down_factor"] = 16 if in_ch >= 64 else 8
+        if num_gates > 0:
+            dit_config["lq_interval"] = (14 + num_gates - 1) // num_gates
         return dit_config
 
     if "{}txt_norm.weight".format(key_prefix) in state_dict_keys:  # Qwen Image

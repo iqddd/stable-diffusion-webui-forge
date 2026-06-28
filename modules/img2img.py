@@ -18,9 +18,9 @@ from modules.processing import (
     StableDiffusionProcessingImg2Img,
     process_images,
 )
-from modules.sd_models import get_closet_checkpoint_match
+from modules.sd_models import get_closet_checkpoint_match, model_data
 from modules.shared import opts, state
-from modules.ui import plaintext_to_html
+from modules.ui import _STEP, plaintext_to_html, sRound
 from modules_forge import main_thread
 
 
@@ -73,12 +73,12 @@ def process_batch(p, input, output_dir, inpaint_mask_dir, args, to_scale=False, 
         img = ImageOps.exif_transpose(img)
 
         if to_scale:
-            p.width = round(img.width * scale_by / 64) * 64
-            p.height = round(img.height * scale_by / 64) * 64
+            p.width = sRound(img.width * scale_by)
+            p.height = sRound(img.height * scale_by)
 
         _w, _h = img.size
-        if not (_w % 64 == 0 and _h % 64 == 0):
-            img = images.resize_image(1, img, round(_w / 64) * 64, round(_h / 64) * 64)
+        if not (_w % _STEP == 0 and _h % _STEP == 0):
+            img = images.resize_image(1, img, sRound(_w), sRound(_h))
 
         p.init_images = [img] * p.batch_size
 
@@ -110,8 +110,11 @@ def process_batch(p, input, output_dir, inpaint_mask_dir, args, to_scale=False, 
                     info_img_path = os.path.join(png_info_dir, os.path.basename(image))
                     info_img = images.read(info_img_path)
                 geninfo, _ = images.read_info_from_image(info_img)
+                _orig: str = shared.opts.infotext_styles
+                shared.opts.infotext_styles = "Ignore"
                 parsed_parameters = parse_generation_parameters(geninfo)
-                parsed_parameters = {k: v for k, v in parsed_parameters.items() if k in (png_info_props or {})}
+                shared.opts.infotext_styles = _orig
+                parsed_parameters = {k: v for k, v in parsed_parameters.items() if k in (png_info_props or [])}
             except Exception:
                 parsed_parameters = {}
 
@@ -206,11 +209,14 @@ def img2img_function(id_task: str, request: gr.Request, mode: int, prompt: str, 
     image = images.fix_image(image)
     mask = images.fix_image(mask)
 
+    if "pid" in model_data.forge_loading_parameters["checkpoint_info"].filename.lower() and not (selected_scale_tab == 1 and scale_by == 4.0):
+        processing.logger.warning("Resize by 4x is recommended for PiD")
+
     if selected_scale_tab == 1 and not is_batch:
         assert image, "Can't scale by because no image is selected"
 
-        width = round(image.width * scale_by / 64) * 64
-        height = round(image.height * scale_by / 64) * 64
+        width = sRound(image.width * scale_by)
+        height = sRound(image.height * scale_by)
 
     assert 0.0 <= denoising_strength <= 1.0, "can only work with strength in [0.0, 1.0]"
 

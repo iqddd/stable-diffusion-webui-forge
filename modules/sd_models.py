@@ -329,11 +329,13 @@ def forge_model_reload():
 
     timer = Timer()
 
-    last_frame: torch.Tensor | None = None
+    _last_frame: torch.Tensor = None
+    # maintain the end_image so that FirstLastFrame is not broken
+    # when reloading Wan 2.2 models via Refiner
 
     if model_data.sd_model is not None:
         if getattr(model_data.sd_model, "end_image", None) is not None:
-            last_frame = model_data.sd_model.end_image.clone()
+            _last_frame = model_data.sd_model.end_image.clone()
 
         model_data.sd_model = None
         model_data.forge_hash = ""
@@ -354,15 +356,13 @@ def forge_model_reload():
 
     dynamic_args.forge_unet_storage_dtype = model_data.forge_loading_parameters.get("unet_storage_dtype", None)
     dynamic_args.embedding_dir = cmd_opts.embeddings_dir
+
     try:
         sd_model = forge_loader(state_dict, additional_state_dicts=additional_state_dicts)
-    except Exception as e:
+    except Exception:
         model_data.sd_model = FakeInitialModel()
-        model_data.forge_loading_parameters = {}
         model_data.forge_hash = ""
-        errors.display(e, "forge_loader")
-        memory_management.logger.error("Failed to load diffusion model... (check README for supported models)")
-        raise BufferError("Failed to load diffusion model...") from None
+        raise
     else:
         timer.record("forge model load")
     finally:
@@ -375,8 +375,8 @@ def forge_model_reload():
     sd_model.sd_model_hash = checkpoint_info.calculate_shorthash()
     timer.record("calculate hash")
 
-    if last_frame is not None:
-        setattr(sd_model, "end_image", last_frame)
+    if _last_frame is not None:
+        setattr(sd_model, "end_image", _last_frame)
 
     shared.opts.data["sd_checkpoint_hash"] = checkpoint_info.sha256
     model_data.set_sd_model(sd_model)

@@ -7,6 +7,7 @@ import torch
 from einops import rearrange, repeat
 
 from backend.args import args
+from backend.loader_gguf import dequantize, get_orig_shape
 from backend.memory_management import logger
 from backend.operations_gguf import ParameterGGUF
 from modules_forge.packages import gguf
@@ -80,7 +81,15 @@ def load_torch_file(ckpt: str, *, safe_load=True, device=None, return_metadata=F
         reader = gguf.GGUFReader(ckpt)
         sd = {}
         for tensor in reader.tensors:
-            sd[str(tensor.name)] = ParameterGGUF(tensor)
+            tensor_name = str(tensor.name)
+            torch_tensor = torch.from_numpy(tensor.data)
+            if (shape := get_orig_shape(reader, tensor_name)) is None:
+                shape = torch.Size(tuple(int(v) for v in reversed(tensor.shape)))
+            if tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
+                torch_tensor = torch_tensor.view(*shape)
+            sd[tensor_name] = ParameterGGUF(torch_tensor, tensor_type=tensor.tensor_type, tensor_shape=shape)
+            if len(shape) <= 1 and tensor.tensor_type == gguf.GGMLQuantizationType.BF16:
+                sd[tensor_name] = dequantize(sd[tensor_name], dtype=torch.float32)
 
     else:
         assert safe_load
