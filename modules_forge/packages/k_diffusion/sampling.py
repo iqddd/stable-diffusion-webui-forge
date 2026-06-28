@@ -202,9 +202,14 @@ def sample_euler_negative_RF(
     noise_sampler = default_noise_sampler(x) if noise_sampler is None else noise_sampler
     s_tmax = float(s_tmax) if isinstance(s_tmax, (int, float)) else 0.99
     s_tmax = s_tmax if 0.0 < s_tmax < 1.0 else 0.99
-    churn_curve_power = extra_args.get("negative_rf_churn_curve_power", 0.2)
-    churn_curve_power = float(churn_curve_power) if isinstance(churn_curve_power, (int, float)) else 0.2
+
+    churn_curve_power = extra_args.get("negative_rf_churn_curve_power", 0.4)
+    churn_curve_power = float(churn_curve_power) if isinstance(churn_curve_power, (int, float)) else 0.4
     churn_curve_power = min(max(churn_curve_power, 0.05), 4.0)
+
+    churn_top_power = extra_args.get("negative_rf_churn_top_power", 1.0)
+    churn_top_power = float(churn_top_power) if isinstance(churn_top_power, (int, float)) else 1.0
+    churn_top_power = min(max(churn_top_power, 0.05), 8.0)
 
     s_in = x.new_ones([x.shape[0]])
     n_steps = len(sigmas) - 1
@@ -215,14 +220,26 @@ def sample_euler_negative_RF(
 
         if s_tmin <= t_i <= s_tmax:
             gamma = max(s_churn / n_steps, 2**0.5 - 1)
+
             t_i_value = float(t_i.item()) if torch.is_tensor(t_i) else float(t_i)
-            if t_i_value > 0.0:
-                # Smooth cap: weak churn near t~1, aggressive churn toward lower t.
-                blend = (1.0 - t_i_value) ** churn_curve_power
-                blend = min(max(blend, 0.0), 1.0)
-                t_hat_target = t_i_value + (1.0 - t_i_value) * blend
-                t_hat_target = min(max(t_hat_target, t_i_value), 1.0 - 1e-6)
-                gamma_cap = max(0.0, t_hat_target / t_i_value - 1.0)
+
+            if t_i_value > 0.0 and s_tmax > s_tmin:
+                # 0 at s_tmax, 1 at s_tmin
+                u = (s_tmax - t_i_value) / (s_tmax - s_tmin)
+                u = min(max(u, 0.0), 1.0)
+
+                # Controls how strongly churn appears near s_tmax.
+                v = u ** churn_top_power
+
+                # Bell-shaped window: 0 at both edges, positive inside.
+                bell = math.sin(math.pi * v)
+                bell = max(0.0, bell) ** churn_curve_power
+
+                target_strength = 2**0.5 - 1.0
+
+                # Built-in headroom to s_tmax.
+                gamma_cap = ((s_tmax - t_i_value) / t_i_value) * bell * target_strength
+
                 gamma = min(gamma, gamma_cap)
             else:
                 gamma = 0.0
