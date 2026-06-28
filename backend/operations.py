@@ -2,6 +2,7 @@
 # Copyright (C) 2025 ComfyUI - where Optimization is Stolen
 # Copyright (C) 2026 Haoming02 - Burnt the Kitchen
 
+import contextlib
 import time
 from typing import Callable, Union
 
