@@ -237,7 +237,8 @@ def compute_empirical_mu(image_seq_len: int, num_steps: int) -> float:
     a2, b2 = 0.00016927, 0.45666666
 
     if image_seq_len > 4300:
-        mu = a2 * image_seq_len + b2
+        # Preserve iqddd's later Flux2 Klein behavior for larger images.
+        mu = 2.02
         return float(mu)
 
     m_200 = a2 * image_seq_len + b2
