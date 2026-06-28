@@ -1,6 +1,4 @@
 import inspect
-import math
-
 import k_diffusion
 import k_diffusion.external
 import torch
@@ -48,40 +46,6 @@ sampler_extra_params = {
 
 k_diffusion_samplers_map = {x.name: x for x in samplers_data_k_diffusion}
 k_diffusion_scheduler = {x.name: x.function for x in sd_schedulers.schedulers}
-
-
-
-
-def get_flux2_image_seq_len(p) -> int:
-    sd_model = shared.sd_model
-    vae = getattr(getattr(sd_model, "forge_objects", None), "vae", None)
-    downscale_ratio = getattr(vae, "downscale_ratio", 16)
-
-    # Flux2 uses scalar downscale ratio (16). Fallback is 16 if unavailable.
-    if isinstance(downscale_ratio, (tuple, list)):
-        downscale_ratio = downscale_ratio[-1]
-
-    width = getattr(p, "width", 1024)
-    height = getattr(p, "height", 1024)
-
-    if getattr(p, "is_hr_pass", False):
-        width = getattr(p, "hr_resize_x", 0) or width
-        height = getattr(p, "hr_resize_y", 0) or height
-
-    latent_w = max(1, int(width) // int(downscale_ratio))
-    latent_h = max(1, int(height) // int(downscale_ratio))
-    return latent_w * latent_h
-
-
-def get_flux2_automatic_sigmas(num_steps: int, image_seq_len: int, device):
-    mu = sd_schedulers.compute_flux2_empirical_mu(image_seq_len=image_seq_len, num_steps=num_steps)
-    alpha = math.exp(mu)
-
-    # Equivalent to generalized_time_snr_shift(t, mu, 1.0) from BFL reference.
-    t = torch.linspace(1.0, 0.0, num_steps + 1, device=device, dtype=torch.float32)
-    sigmas = (alpha * t) / (1.0 + (alpha - 1.0) * t)
-    return sigmas, mu
-
 
 class CFGDenoiserKDiffusion(sd_samplers_cfg_denoiser.CFGDenoiser):
     @property
