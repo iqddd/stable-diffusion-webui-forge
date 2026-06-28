@@ -70,6 +70,17 @@ if memory_management.flash_enabled():
         return q.new_empty(q.shape)
 
 
+if memory_management.sage_enabled():
+    @torch.library.custom_op("sage_attention::sage_attn", mutates_args=())
+    def sage_attn_wrapper(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, tensor_layout_hnd: bool = False) -> torch.Tensor:
+        tensor_layout = "HND" if tensor_layout_hnd else "NHD"
+        return sageattn(q, k, v, attn_mask=None, is_causal=False, tensor_layout=tensor_layout)
+
+    @sage_attn_wrapper.register_fake
+    def sage_attn_fake(q, k, v, tensor_layout_hnd=False):
+        return q.new_empty(q.shape)
+
+
 def get_attn_precision(attn_precision: torch.dtype, current_dtype: torch.dtype) -> torch.dtype:
     memory_management.force_upcast_attention_dtype().get(current_dtype, attn_precision)
 
@@ -234,7 +245,6 @@ def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_resha
     return out
 
 
-@torch.compiler.disable
 def attention_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
     in_dtype = v.dtype
     if torch.float32 in (q.dtype, k.dtype, v.dtype):
@@ -262,7 +272,10 @@ def attention_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=
 
     try:
         if not _fallback:
-            out = sageattn(q, k, v, attn_mask=mask, is_causal=False, tensor_layout=tensor_layout).to(in_dtype)
+            if mask is None:
+                out = sage_attn_wrapper(q, k, v, tensor_layout == "HND").to(in_dtype)
+            else:
+                out = sageattn(q, k, v, attn_mask=mask, is_causal=False, tensor_layout=tensor_layout).to(in_dtype)
     except Exception as e:
         logger.error(f"Error running sageattn: {e}")
         _fallback = True

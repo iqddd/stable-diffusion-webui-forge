@@ -2,7 +2,6 @@
 # Copyright (C) 2025 ComfyUI - where Optimization is Stolen
 # Copyright (C) 2026 Haoming02 - Burnt the Kitchen
 
-import contextlib
 import time
 from typing import Callable, Union
 
@@ -96,12 +95,12 @@ def weights_manual_cast(
     if skip_bias_dtype or bias_has_function:
         bias_args.pop("dtype")
 
+    offload_stream = None
+    context = None
     if stream.should_use_stream():
         offload_stream = memory_management.get_offload_stream(target_device)
-        context = stream.stream_context()(offload_stream)
-    else:
-        offload_stream = None
-        context = None
+        if offload_stream is not None:
+            context = stream.stream_context()(offload_stream)
 
     if layer.weight is not None:
         weight = memory_management.cast_to(
@@ -154,21 +153,35 @@ def weights_manual_cast(
     return weight, bias, (offload_stream, weight_a, bias_a)
 
 
-@contextlib.contextmanager
+class _MainStreamWorker:
+    def __init__(self, offload_stream: tuple[torch.Stream, torch.Tensor, torch.Tensor] | None):
+        self.offload_stream = offload_stream
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        offload_stream = self.offload_stream
+        if offload_stream is None:
+            return False
+
+        os, weight_a, bias_a = offload_stream
+        if os is None:
+            return False
+
+        if weight_a is not None:
+            device = weight_a.device
+        elif bias_a is not None:
+            device = bias_a.device
+        else:
+            return False
+
+        os.wait_stream(memory_management.current_stream(device))
+        return False
+
+
 def main_stream_worker(weight, bias, offload_stream: tuple[torch.Stream, torch.Tensor, torch.Tensor]):
-    yield
-    if offload_stream is None:
-        return
-    os, weight_a, bias_a = offload_stream
-    if os is None:
-        return
-    if weight_a is not None:
-        device = weight_a.device
-    elif bias_a is not None:
-        device = bias_a.device
-    else:
-        return
-    os.wait_stream(memory_management.current_stream(device))
+    return _MainStreamWorker(offload_stream)
 
 
 current_device: torch.device = None

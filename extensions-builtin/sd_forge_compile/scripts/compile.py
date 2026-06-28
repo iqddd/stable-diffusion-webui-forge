@@ -1,7 +1,9 @@
 # https://github.com/Comfy-Org/ComfyUI/blob/master/comfy_extras/nodes_torch_compile.py
 
 import logging
+import os
 from functools import wraps
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -25,6 +27,15 @@ else:
 _COMPILE_CONFIG_KEY = "_torch_compile_config"
 _COMPILE_WRAPPER_KEY = "_torch_compile_wrapper"
 _ORIG_APPLY_KEY = "_orig_apply_model"
+_GRAPH_BREAK_ENV = "FORGE_TORCH_COMPILE_DEBUG_GRAPH_BREAKS"
+_GRAPH_BREAK_LOG_ENV = "FORGE_TORCH_COMPILE_DEBUG_LOG"
+_GRAPH_BREAK_VERBOSE_ENV = "FORGE_TORCH_COMPILE_DEBUG_GRAPH_BREAKS_VERBOSE"
+_GRAPH_BREAK_LOGGERS = ("torch._dynamo",)
+_GRAPH_BREAK_VERBOSE_LOGGERS = (
+    "torch._inductor",
+    "torch.fx.experimental.symbolic_shapes",
+    "torch._guards",
+)
 
 logger = logging.getLogger("compile")
 setup_logger(logger)
@@ -34,10 +45,82 @@ def skip_torch_compile_dict(guard_entries):
     return [("transformer_options" not in entry.name) for entry in guard_entries]
 
 
+class _TeeStream:
+    def __init__(self, primary, mirror):
+        self.primary = primary
+        self.mirror = mirror
+
+    def write(self, data):
+        self.primary.write(data)
+        self.mirror.write(data)
+        return len(data)
+
+    def flush(self):
+        self.primary.flush()
+        self.mirror.flush()
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _configure_graph_break_diagnostics():
+    if getattr(_configure_graph_break_diagnostics, "_configured", False):
+        return
+
+    _configure_graph_break_diagnostics._configured = True
+
+    if not _env_flag(_GRAPH_BREAK_ENV):
+        return
+
+    verbose = _env_flag(_GRAPH_BREAK_VERBOSE_ENV)
+    log_path = Path(os.getenv(_GRAPH_BREAK_LOG_ENV, "torch_compile_graph_breaks.log")).expanduser().resolve()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    log_kwargs = dict(
+        dynamo=logging.INFO,
+        graph_breaks=True,
+    )
+
+    if verbose:
+        log_kwargs.update(
+            inductor=logging.INFO,
+            guards=True,
+            recompiles=True,
+            trace_source=True,
+        )
+
+    torch._logging.set_logs(**log_kwargs)
+
+    mirror_stream = log_path.open("a", encoding="utf-8")
+    _configure_graph_break_diagnostics._mirror_stream = mirror_stream
+
+    logger_names = _GRAPH_BREAK_LOGGERS
+    if verbose:
+        logger_names = logger_names + _GRAPH_BREAK_VERBOSE_LOGGERS
+
+    for logger_name in logger_names:
+        target_logger = logging.getLogger(logger_name)
+        target_logger.setLevel(logging.DEBUG)
+
+        for handler in target_logger.handlers:
+            stream = getattr(handler, "stream", None)
+            if stream is None or isinstance(stream, _TeeStream):
+                continue
+
+            handler.setStream(_TeeStream(stream, mirror_stream))
+
+    logger.info(
+        f"Graph-break diagnostics enabled: {_GRAPH_BREAK_ENV}=1 -> {log_path}"
+        f"{' (verbose)' if verbose else ''}"
+    )
+
+
 class TorchCompileForForge(scripts.Script):
     sorting_priority = 99999
 
     def __init__(self):
+        _configure_graph_break_diagnostics()
         torch._dynamo.config.cache_size_limit = 256
         torch._dynamo.config.suppress_errors = True
 
