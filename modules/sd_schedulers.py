@@ -265,6 +265,24 @@ def flux2_scheduler(n: int, width: int, height: int, sigma_min, sigma_max, devic
     return torch.FloatTensor(sigmas).to(device)
 
 
+def krea2_raw_scheduler(n: int, width: int, height: int, sigma_min, sigma_max, device):
+    # https://github.com/krea-ai/krea-2/blob/main/sampling.py
+    # Krea 2 RAW uses a resolution-aware Euler flow schedule with mu interpolated
+    # between 256px and 1280px training endpoints in latent-patch space.
+    seq_len = round(width * height / (16 * 16))
+    min_seq_len = (256 // 16) ** 2
+    max_seq_len = (1280 // 16) ** 2
+    y1 = 0.5
+    y2 = 1.15
+
+    slope = (y2 - y1) / (max_seq_len - min_seq_len)
+    mu = slope * seq_len + (y1 - slope * min_seq_len)
+
+    timesteps = torch.linspace(1, 0, n + 1)
+    timesteps = generalized_time_snr_shift(timesteps, float(mu), 1.0)
+    return torch.FloatTensor(timesteps).to(device)
+
+
 all_schedulers = [
     Scheduler("automatic", "Automatic", None),
     Scheduler("karras", "Karras", k_diffusion.sampling.get_sigmas_karras, default_rho=7.0),
@@ -283,6 +301,7 @@ all_schedulers = [
     Scheduler("bong_tangent", "Bong Tangent", bong_tangent_scheduler),
     Scheduler("flow_match", "FlowMatchEulerDiscrete", flow_match_euler_discrete_scheduler, need_inner_model=True),
     Scheduler("flux2", "Flux2", flux2_scheduler),
+    Scheduler("krea2_raw", "Krea2 Raw", krea2_raw_scheduler),
 ]
 
 schedulers = [s for s in all_schedulers if s.label not in shared.opts.hide_schedulers]

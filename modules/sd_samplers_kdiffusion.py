@@ -123,7 +123,7 @@ class KDiffusionSampler(sd_samplers_common.Sampler):
                 p.extra_generation_params["Beta schedule alpha"] = opts.beta_dist_alpha
                 p.extra_generation_params["Beta schedule beta"] = opts.beta_dist_beta
 
-            if scheduler.label == "Flux2":
+            if scheduler.label in {"Flux2", "Krea2 Raw"}:
                 if p.is_hr_pass:
                     sigmas_kwargs["width"] = p.hr_upscale_to_x
                     sigmas_kwargs["height"] = p.hr_upscale_to_y

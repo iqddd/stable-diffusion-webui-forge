@@ -37,7 +37,11 @@ class Qwen3VLTextProcessingEngine:
         self.vision_block = "<|vision_start|><|image_pad|><|vision_end|>"
 
     def tokenize(self, texts, images=[]):
-        llama_texts = [((self.image_template.replace(self.vision_block, self.vision_block * len(images), 1) if images else self.llama_template).format(text)) if text else " " for text in texts]
+        template = self.image_template.replace(self.vision_block, self.vision_block * len(images), 1) if images else self.llama_template
+        # Krea 2 expects even the unconditional branch to go through the same
+        # chat template; replacing an empty prompt with a bare space corrupts
+        # CFG because cond/uncond no longer share the same prompt format.
+        llama_texts = [template.format(text) for text in texts]
         return self.tokenizer(llama_texts)["input_ids"]
 
     def tokenize_line(self, line: str, images=[]):

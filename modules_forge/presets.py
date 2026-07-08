@@ -47,7 +47,7 @@ SCHEDULERS = {
     PresetArch.anima: "Beta",
     PresetArch.ernie: "Simple",
     PresetArch.pid: "Simple",
-    PresetArch.krea: "Simple",
+    PresetArch.krea: "Krea2 Raw",
 }
 
 STEPS = {
@@ -62,7 +62,7 @@ STEPS = {
     PresetArch.anima: 32,
     PresetArch.ernie: 8,
     PresetArch.pid: 4,
-    PresetArch.krea: 8,
+    PresetArch.krea: 52,
 }
 
 CFG = {
@@ -77,7 +77,7 @@ CFG = {
     PresetArch.anima: 4.0,
     PresetArch.ernie: 1.0,
     PresetArch.pid: 1.0,
-    PresetArch.krea: 1.0,
+    PresetArch.krea: 3.5,
 }
 
 DISTILL = {
@@ -92,7 +92,6 @@ SHIFT = {
     PresetArch.anima: 3.0,
     PresetArch.ernie: 3.0,
     PresetArch.pid: -1.5,
-    PresetArch.krea: -1.15,
 }
 
 FRAMES = {
