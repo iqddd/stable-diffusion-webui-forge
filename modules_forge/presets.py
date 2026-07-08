@@ -47,7 +47,7 @@ SCHEDULERS = {
     PresetArch.anima: "Beta",
     PresetArch.ernie: "Simple",
     PresetArch.pid: "Simple",
-    PresetArch.krea: "Krea2 Raw",
+    PresetArch.krea: "Krea2",
 }
 
 STEPS = {

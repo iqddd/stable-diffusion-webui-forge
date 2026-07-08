@@ -265,7 +265,17 @@ def flux2_scheduler(n: int, width: int, height: int, sigma_min, sigma_max, devic
     return torch.FloatTensor(sigmas).to(device)
 
 
-def krea2_raw_scheduler(n: int, width: int, height: int, sigma_min, sigma_max, device):
+def _get_krea2_mu(width: int, height: int) -> float:
+    checkpoint_name = ""
+    if getattr(shared, "sd_model", None) is not None:
+        checkpoint_info = getattr(shared.sd_model, "sd_checkpoint_info", None)
+        if checkpoint_info is not None:
+            checkpoint_name = f"{checkpoint_info.name_for_extra} {checkpoint_info.filename}".lower()
+
+    if "turbo" in checkpoint_name:
+        # Official Krea 2 Turbo inference pins a fixed mu=1.15 regardless of resolution.
+        return 1.15
+
     # https://github.com/krea-ai/krea-2/blob/main/sampling.py
     # Krea 2 RAW uses a resolution-aware Euler flow schedule with mu interpolated
     # between 256px and 1280px training endpoints in latent-patch space.
@@ -276,10 +286,13 @@ def krea2_raw_scheduler(n: int, width: int, height: int, sigma_min, sigma_max, d
     y2 = 1.15
 
     slope = (y2 - y1) / (max_seq_len - min_seq_len)
-    mu = slope * seq_len + (y1 - slope * min_seq_len)
+    return float(slope * seq_len + (y1 - slope * min_seq_len))
 
+
+def krea2_scheduler(n: int, width: int, height: int, sigma_min, sigma_max, device):
+    mu = _get_krea2_mu(width, height)
     timesteps = torch.linspace(1, 0, n + 1)
-    timesteps = generalized_time_snr_shift(timesteps, float(mu), 1.0)
+    timesteps = generalized_time_snr_shift(timesteps, mu, 1.0)
     return torch.FloatTensor(timesteps).to(device)
 
 
@@ -301,9 +314,9 @@ all_schedulers = [
     Scheduler("bong_tangent", "Bong Tangent", bong_tangent_scheduler),
     Scheduler("flow_match", "FlowMatchEulerDiscrete", flow_match_euler_discrete_scheduler, need_inner_model=True),
     Scheduler("flux2", "Flux2", flux2_scheduler),
-    Scheduler("krea2_raw", "Krea2 Raw", krea2_raw_scheduler),
+    Scheduler("krea2", "Krea2", krea2_scheduler, aliases=["Krea2 Raw", "krea2_raw"]),
 ]
 
 schedulers = [s for s in all_schedulers if s.label not in shared.opts.hide_schedulers]
 
-schedulers_map = {**{x.name: x for x in schedulers}, **{x.label: x for x in schedulers}}
+schedulers_map = {**{x.name: x for x in schedulers}, **{x.label: x for x in schedulers}, **{alias: x for x in schedulers for alias in (x.aliases or [])}}
