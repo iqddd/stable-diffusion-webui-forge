@@ -80,7 +80,13 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
                 cls_name = "AutoencoderKLFlux2"
                 config_path = os.path.join(HF, "black-forest-labs", "FLUX.2-klein-9B", "vae")
             elif _dim == 16:
-                if "decoder.middle.0.residual.0.gamma" in state_dict:
+                # Qwen2D-VAE uses the Qwen Image VAE layout but does not have
+                # the residual gamma key present in the original Qwen VAE.
+                # Its 96/384-channel small decoder uniquely identifies it.
+                is_qwen_vae = "decoder.middle.0.residual.0.gamma" in state_dict or (
+                    "decoder.conv_in.weight" in state_dict and state_dict["decoder.conv_in.weight"].shape[0] == 384
+                )
+                if is_qwen_vae:
                     cls_name = "AutoencoderKLQwenImage"
                     config_path = os.path.join(HF, "Qwen", "Qwen-Image", "vae")
                 else:
@@ -485,6 +491,15 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
             model = pre_func(model)
             load_state_dict(model, state_dict)
+
+            # PiD v1.5 keeps its LQ projection branch in bf16 alongside an
+            # int8 mixed-precision backbone.  MixedPrecisionOps constructs
+            # unquantized Conv2d modules as fp32, so explicitly align this
+            # branch with the model's compute dtype after its weights load.
+            if cls_name == "PiDTransformer2DModel":
+                model.lq_proj.to(dtype=computation_dtype)
+                if model.pit_lq_gate is not None:
+                    model.pit_lq_gate.to(dtype=computation_dtype)
             # model = post_func(model)
 
             if hasattr(model, "_internal_dict"):

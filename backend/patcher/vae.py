@@ -131,7 +131,15 @@ class VAE:
             self.downscale_ratio = 8
             self.downscale_index_formula = None
             self.latent_dim = 2
-            self.latent_channels = 32 if is_mugen else int(model.config.latent_channels)  # 4 | 16
+            if is_mugen:
+                self.latent_channels = 32
+            else:
+                # Qwen2D-VAE exposes ``z_dim`` in its FrozenDict config rather
+                # than Diffusers' usual ``latent_channels`` field.
+                latent_channels = getattr(model.config, "latent_channels", None)
+                if latent_channels is None:
+                    latent_channels = model.config.get("z_dim")
+                self.latent_channels = int(latent_channels)  # 4 | 16
             self.memory_used_encode = lambda shape, dtype: (1767 * shape[2] * shape[3]) * memory_management.dtype_size(dtype)
             self.memory_used_decode = lambda shape, dtype: (2178 * shape[2] * shape[3] * 64) * memory_management.dtype_size(dtype)
 
