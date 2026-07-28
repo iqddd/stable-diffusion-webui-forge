@@ -7,7 +7,7 @@ from collections import namedtuple
 from copy import copy
 from io import StringIO
 from itertools import chain, permutations
-from math import sqrt
+from math import isfinite, sqrt
 from typing import TypeVar
 
 import gradio as gr
@@ -513,20 +513,46 @@ class Script(scripts.Script):
                 include_sub_grids = gr.Checkbox(label="Include Sub Grids", value=False, elem_id=self.elem_id("include_sub_grids"))
                 csv_mode = gr.Checkbox(label="Use text inputs instead of dropdowns", value=False, elem_id=self.elem_id("csv_mode"))
 
+        with gr.Row(variant="compact", elem_id=self.elem_id("axis_costs")):
+            with gr.Column(scale=0, min_width=140):
+                override_x_cost = gr.Checkbox(label="Override X cost", value=False, min_width=120, elem_id=self.elem_id("override_x_cost"), scale=0)
+                x_cost = gr.Number(label="", value=self.current_axis_options[1].cost, minimum=0, step=0.1, interactive=False, show_label=False, min_width=80, elem_id=self.elem_id("x_cost"), elem_classes=["xyz-axis-cost"], scale=0)
+            with gr.Column(scale=0, min_width=140):
+                override_y_cost = gr.Checkbox(label="Override Y cost", value=False, min_width=120, elem_id=self.elem_id("override_y_cost"), scale=0)
+                y_cost = gr.Number(label="", value=self.current_axis_options[0].cost, minimum=0, step=0.1, interactive=False, show_label=False, min_width=80, elem_id=self.elem_id("y_cost"), elem_classes=["xyz-axis-cost"], scale=0)
+            with gr.Column(scale=0, min_width=140):
+                override_z_cost = gr.Checkbox(label="Override Z cost", value=False, min_width=120, elem_id=self.elem_id("override_z_cost"), scale=0)
+                z_cost = gr.Number(label="", value=self.current_axis_options[0].cost, minimum=0, step=0.1, interactive=False, show_label=False, min_width=80, elem_id=self.elem_id("z_cost"), elem_classes=["xyz-axis-cost"], scale=0)
+
         with gr.Row(variant="compact", elem_id="swap_axes"):
             swap_xy_axes_button = gr.Button(value="Swap X/Y axes", elem_id="xy_grid_swap_axes_button")
             swap_yz_axes_button = gr.Button(value="Swap Y/Z axes", elem_id="yz_grid_swap_axes_button")
             swap_xz_axes_button = gr.Button(value="Swap X/Z axes", elem_id="xz_grid_swap_axes_button")
 
-        def swap_axes(axis1_type, axis1_values, axis1_values_dropdown, axis2_type, axis2_values, axis2_values_dropdown):
-            return self.current_axis_options[axis2_type].label, axis2_values, axis2_values_dropdown, self.current_axis_options[axis1_type].label, axis1_values, axis1_values_dropdown
+        def swap_axes(axis1_type, axis1_values, axis1_values_dropdown, axis1_override_cost, axis1_cost, axis2_type, axis2_values, axis2_values_dropdown, axis2_override_cost, axis2_cost):
+            return self.current_axis_options[axis2_type].label, axis2_values, axis2_values_dropdown, axis2_override_cost, axis2_cost, self.current_axis_options[axis1_type].label, axis1_values, axis1_values_dropdown, axis1_override_cost, axis1_cost
 
-        xy_swap_args = [x_type, x_values, x_values_dropdown, y_type, y_values, y_values_dropdown]
+        xy_swap_args = [x_type, x_values, x_values_dropdown, override_x_cost, x_cost, y_type, y_values, y_values_dropdown, override_y_cost, y_cost]
         swap_xy_axes_button.click(swap_axes, inputs=xy_swap_args, outputs=xy_swap_args)
-        yz_swap_args = [y_type, y_values, y_values_dropdown, z_type, z_values, z_values_dropdown]
+        yz_swap_args = [y_type, y_values, y_values_dropdown, override_y_cost, y_cost, z_type, z_values, z_values_dropdown, override_z_cost, z_cost]
         swap_yz_axes_button.click(swap_axes, inputs=yz_swap_args, outputs=yz_swap_args)
-        xz_swap_args = [x_type, x_values, x_values_dropdown, z_type, z_values, z_values_dropdown]
+        xz_swap_args = [x_type, x_values, x_values_dropdown, override_x_cost, x_cost, z_type, z_values, z_values_dropdown, override_z_cost, z_cost]
         swap_xz_axes_button.click(swap_axes, inputs=xz_swap_args, outputs=xz_swap_args)
+
+        def toggle_cost_override(enabled, axis_type, cost):
+            value = cost if enabled else self.current_axis_options[axis_type or 0].cost
+            return gr.update(value=value, interactive=enabled)
+
+        override_x_cost.change(fn=toggle_cost_override, inputs=[override_x_cost, x_type, x_cost], outputs=[x_cost])
+        override_y_cost.change(fn=toggle_cost_override, inputs=[override_y_cost, y_type, y_cost], outputs=[y_cost])
+        override_z_cost.change(fn=toggle_cost_override, inputs=[override_z_cost, z_type, z_cost], outputs=[z_cost])
+
+        def reset_axis_cost(axis_type):
+            return self.current_axis_options[axis_type or 0].cost
+
+        x_type.input(fn=reset_axis_cost, inputs=[x_type], outputs=[x_cost])
+        y_type.input(fn=reset_axis_cost, inputs=[y_type], outputs=[y_cost])
+        z_type.input(fn=reset_axis_cost, inputs=[z_type], outputs=[z_cost])
 
         def fill(axis_type, csv_mode):
             axis = self.current_axis_options[axis_type]
@@ -591,9 +617,9 @@ class Script(scripts.Script):
             (z_values_dropdown, lambda params: get_dropdown_update_from_params("Z", params)),
         )
 
-        return [x_type, x_values, x_values_dropdown, y_type, y_values, y_values_dropdown, z_type, z_values, z_values_dropdown, draw_legend, include_lone_images, include_sub_grids, no_fixed_seeds, vary_seeds_x, vary_seeds_y, vary_seeds_z, row_count, margin_size, csv_mode]
+        return [x_type, x_values, x_values_dropdown, y_type, y_values, y_values_dropdown, z_type, z_values, z_values_dropdown, draw_legend, include_lone_images, include_sub_grids, no_fixed_seeds, vary_seeds_x, vary_seeds_y, vary_seeds_z, row_count, margin_size, csv_mode, override_x_cost, x_cost, override_y_cost, y_cost, override_z_cost, z_cost]
 
-    def run(self, p, x_type, x_values, x_values_dropdown, y_type, y_values, y_values_dropdown, z_type, z_values, z_values_dropdown, draw_legend, include_lone_images, include_sub_grids, no_fixed_seeds, vary_seeds_x, vary_seeds_y, vary_seeds_z, row_count, margin_size, csv_mode):
+    def run(self, p, x_type, x_values, x_values_dropdown, y_type, y_values, y_values_dropdown, z_type, z_values, z_values_dropdown, draw_legend, include_lone_images, include_sub_grids, no_fixed_seeds, vary_seeds_x, vary_seeds_y, vary_seeds_z, row_count, margin_size, csv_mode, override_x_cost=False, x_cost=0.0, override_y_cost=False, y_cost=0.0, override_z_cost=False, z_cost=0.0):
         x_type, y_type, z_type = x_type or 0, y_type or 0, z_type or 0  # if axle type is None set to 0
 
         if not no_fixed_seeds:
@@ -736,26 +762,40 @@ class Script(scripts.Script):
         state.xyz_plot_y = AxisInfo(y_opt, ys)
         state.xyz_plot_z = AxisInfo(z_opt, zs)
 
+        def effective_axis_cost(axis, override, cost):
+            if not override:
+                return axis.cost
+
+            cost = float(cost)
+            if not isfinite(cost) or cost < 0:
+                raise ValueError(f'{axis.label} axis cost must be a finite non-negative number, got "{cost}"')
+
+            return cost
+
+        x_cost = effective_axis_cost(x_opt, override_x_cost, x_cost)
+        y_cost = effective_axis_cost(y_opt, override_y_cost, y_cost)
+        z_cost = effective_axis_cost(z_opt, override_z_cost, z_cost)
+
         # If one of the axes is very slow to change between (like SD model
         # checkpoint), then make sure it is in the outer iteration of the nested
         # `for` loop.
         first_axes_processed = "z"
         second_axes_processed = "y"
-        if x_opt.cost > y_opt.cost and x_opt.cost > z_opt.cost:
+        if x_cost > y_cost and x_cost > z_cost:
             first_axes_processed = "x"
-            if y_opt.cost > z_opt.cost:
+            if y_cost > z_cost:
                 second_axes_processed = "y"
             else:
                 second_axes_processed = "z"
-        elif y_opt.cost > x_opt.cost and y_opt.cost > z_opt.cost:
+        elif y_cost > x_cost and y_cost > z_cost:
             first_axes_processed = "y"
-            if x_opt.cost > z_opt.cost:
+            if x_cost > z_cost:
                 second_axes_processed = "x"
             else:
                 second_axes_processed = "z"
-        elif z_opt.cost > x_opt.cost and z_opt.cost > y_opt.cost:
+        elif z_cost > x_cost and z_cost > y_cost:
             first_axes_processed = "z"
-            if x_opt.cost > y_opt.cost:
+            if x_cost > y_cost:
                 second_axes_processed = "x"
             else:
                 second_axes_processed = "y"

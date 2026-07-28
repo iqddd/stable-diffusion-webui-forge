@@ -1825,6 +1825,18 @@ div.xyz_entries button.secondary {
     margin-left: var(--spacing-lg);
 }
 
+div.xyz-axis-cost.gradio-number {
+    flex: 0 0 auto !important;
+    width: 6em !important;
+    min-width: 6em !important;
+}
+
+div.xyz-axis-cost.gradio-number input[type="number"] {
+    padding: var(--size-2) !important;
+    height: var(--size-6) !important;
+    text-align: center;
+}
+
 #swap_axes {
     margin-top: var(--spacing-lg);
 }
