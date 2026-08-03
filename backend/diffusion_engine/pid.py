@@ -5,7 +5,6 @@ from backend import memory_management
 from backend.args import dynamic_args
 from backend.diffusion_engine.base import ForgeDiffusionEngine, ForgeObjects
 from backend.misc.context_windows import IndexListContextHandler
-from backend.modules.k_prediction import PredictionDiscreteFlow
 from backend.nn.vae import AutoencoderKLFlux2, IntegratedAutoencoderKL
 from backend.nn.wan_vae import WanVAE
 from backend.patcher.clip import CLIP
@@ -38,7 +37,7 @@ class PiD(ForgeDiffusionEngine):
 
         vae = VAE(model=ae, is_wan=is_wan, is_flux2=is_flux2)
 
-        k_predictor = PredictionDiscreteFlow(estimated_config)
+        k_predictor = self._get_predictor()
 
         unet = UnetPatcher.from_model(model=huggingface_components["transformer"], diffusers_scheduler=None, k_predictor=k_predictor, config=estimated_config)
 
@@ -70,16 +69,17 @@ class PiD(ForgeDiffusionEngine):
         _, _, h, w = x.shape
         if h * w < 512 * 512:
             memory_management.logger.warning(f"Input Resolution ({w}x{h}) is too small, this may cause discoloration/artifacts...")
+        if h * w > 2048 * 2048:
+            memory_management.logger.warning(f"Input Resolution ({w}x{h}) is too large, this may cause discoloration/artifacts...")
         step: int = getattr(opts, "res_step", 64)
         h, w = round(h / step) * step, round(w / step) * step
         return torch.nn.functional.interpolate(x, size=(h, w), mode="bilinear")
 
     @torch.inference_mode()
-    def encode_first_stage(self, x):
-        x = self._validate(x)
-        sample = self.forge_objects.vae.encode(x.movedim(1, -1) * 0.5 + 0.5)
-        sample = self.forge_objects.vae.first_stage_model.process_in(sample)
-        sample = sample.squeeze(2)
+    def encode_first_stage(self, x: torch.Tensor):
+        start_image = self._validate(x[:1]).movedim(0, -1).mul_(0.5).add_(0.5).unsqueeze(0)
+        sample = self.forge_objects.vae.encode(start_image)
+        sample = self.forge_objects.vae.first_stage_model.process_in(sample).squeeze(2)
         dynamic_args.lq_latent[0] = sample.detach().clone()
 
         return sample

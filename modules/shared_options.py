@@ -176,6 +176,7 @@ options_templates.update(
             "dump_stacks_on_signal": OptionInfo(False, "Print the stack trace before terminating the webui via Ctrl + C"),
             "confirm_leave": OptionInfo(False, "Show a browser confirmation before leaving the page"),
             "no_spellcheck": OptionInfo(False, "Disable auto-correct / spellcheck for prompt fields").needs_reload_ui(),
+            "keep_alive": OptionInfo(False, "Keep generating even when the WebUI browser tab is not in focus").info('for "Generate forever"').needs_reload_ui(),
             "undo_redo": OptionInfo(False, "Enable undo / redo history for prompt fields").needs_reload_ui(),
         },
     )
@@ -251,6 +252,9 @@ options_templates.update(
             "divmisc": OptionDiv(),
             "qwen_vae_resize": OptionInfo(False, "[Qwen-Image-Edit] Resize input image to 1 megapixel for ref_latent"),
             "klein_no_reference": OptionInfo(False, "[Klein] Disable Reference").info("disable Edit ; enable img2img").info("pin to <b>Quicksettings</b> is recommended if changed often"),
+            "anima_do_reference": OptionInfo(False, "[Anima] Enable Reference").info("enable Edit ; disable img2img").info("pin to <b>Quicksettings</b> is recommended if changed often").info("requires specfic Edit LoRA"),
+            "krea2_do_reference": OptionInfo(False, "[Krea2] Enable Reference").info("enable Edit ; disable img2img").info("pin to <b>Quicksettings</b> is recommended if changed often").info("requires specfic Edit LoRA"),
+            "reference_explanation": OptionHTML("<b>Note:</b> Remember to change the setting before txt2img to clear the reference"),
         },
     )
 )
@@ -367,19 +371,9 @@ options_templates.update(
     options_section(
         ("refiner", "Refiner", "sd"),
         {
-            "show_refiner": OptionInfo(False, "Display the Refiner Accordion").info("Refiner swaps the model in the middle of generation; useful for Wan 2.2 <b>High Noise</b> to <b>Low Noise</b> switching").needs_reload_ui(),
-            "refiner_fast_sd": OptionInfo(False, 'Reload "state_dict" Only').info("EXPERIMENTAL"),
+            "show_refiner": OptionInfo(True, "Display the Refiner Accordion").info("Refiner swaps the model in the middle of generation; useful for Wan 2.2 <b>High Noise</b> to <b>Low Noise</b> switching").needs_reload_ui(),
+            "refiner_fast_sd": OptionInfo(False, 'Reload "state_dict" Only').info("EXPERIMENTAL").needs_reload_ui(),
             "refiner_use_steps": OptionInfo(False, 'Switch based on "steps" instead').info('by default, Refiner swaps the model based on "sigmas" to match <a href="https://www.reddit.com/r/StableDiffusion/comments/1n3qns1/wan_22_how_many_highsteps_are_needed_a_simple/">Wan 2.2</a> \'s behavior'),
-            "refiner_lora_replacement": OptionInfo(
-                "high_noise=low_noise",
-                "Lora Replacements",
-                gr.Textbox,
-                {"lines": 3, "max_lines": 12, "placeholder": "high_noise=low_noise"},
-            ),
-            "refiner_lora_explanation": OptionHTML("""
-Use the "Lora Replacements" to load different LoRAs between the normal pass and the refiner pass.<br>
-Separate the original and the target with an equal sign; Place each entry in its own line.
-                """),
         },
     )
 )
@@ -430,7 +424,7 @@ options_templates.update(
             "remove_image_on_hover": OptionInfo(True, "For image inputs in Extras and PNG Info, remove the current image when dragging another image over it").info("allow you to drag-and-drop images onto the input similar to AUTOMATIC1111 behavior").needs_reload_ui(),
             "forbidden_knowledge": OptionInfo(False, "Forbidden Knowledge").info('replace "<b>DPM++ 2s a RF</b>" with "<b>Flux Realistic</b>"').needs_restart(),
             "div_prompt": OptionDiv(),
-            "prompt_box_style": OptionInfo("Default", "Prompt Layout", gr.Radio, {"choices": ("Default", "Compact", "Scrollable", "Accordion")}).html(f"""
+            "prompt_box_style": OptionInfo("Default", "Prompt Layout", gr.Radio, {"choices": ("Default", "Compact", "Scrollable", "Accordion")}).html("""
 <ul style='margin-left: 1.5em'>
 <li><b>Default:</b> the original Automatic1111 layout</li>
 <li><b>Compact:</b> put Prompts inside the Generate tab, leaving more space for the Gallery</li>

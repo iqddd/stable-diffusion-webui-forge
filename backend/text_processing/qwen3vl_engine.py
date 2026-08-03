@@ -33,20 +33,21 @@ class Qwen3VLTextProcessingEngine:
         self.id_image = 151655
 
         self.llama_template = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
-        self.image_template = "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{}<|im_end|>\n<|im_start|>assistant\n"
+
         self.vision_block = "<|vision_start|><|image_pad|><|vision_end|>"
 
-    def tokenize(self, texts, images=[]):
-        template = self.image_template.replace(self.vision_block, self.vision_block * len(images), 1) if images else self.llama_template
-        # Krea 2 expects even the unconditional branch to go through the same
-        # chat template; replacing an empty prompt with a bare space corrupts
-        # CFG because cond/uncond no longer share the same prompt format.
-        llama_texts = [template.format(text) for text in texts]
+    def tokenize(self, texts: list[str], images: int = 0):
+        if images:
+            prompts = [(self.vision_block * images + text.strip()) for text in texts]
+        else:
+            prompts = [text.strip() for text in texts]
+
+        llama_texts = [self.llama_template.format(p) for p in prompts]
         return self.tokenizer(llama_texts)["input_ids"]
 
-    def tokenize_line(self, line: str, images=[]):
+    def tokenize_line(self, line: str, images: list[torch.Tensor] = []):
         parsed = parsing.parse_prompt_attention(line, self.emphasis.name)
-        tokenized = self.tokenize([text for text, _ in parsed], images)
+        tokenized = self.tokenize([text for text, _ in parsed], len(images))
 
         chunks = []
         chunk = PromptChunk()
@@ -76,8 +77,11 @@ class Qwen3VLTextProcessingEngine:
 
         return chunks
 
-    def __call__(self, texts, images=None):
-        self.emphasis = emphasis.get_current_option(opts.emphasis)()
+    def __call__(self, texts, images: list[torch.Tensor] = []):
+        if images:
+            self.emphasis = emphasis.EmphasisNone()
+        else:
+            self.emphasis = emphasis.get_current_option(opts.emphasis)()
 
         if any(emphasis.uses_emphasis(x) for x in texts):
             dynamic_args.last_extra_generation_params["Emphasis"] = self.emphasis.name
@@ -98,6 +102,11 @@ class Qwen3VLTextProcessingEngine:
 
                     z = self.process_tokens([tokens], [multipliers])
                     z = self.strip_template(z, tokens)
+
+                    b, seq, fuse = z.shape
+                    assert b == 1 and fuse == 12 * 2560
+                    z = z.reshape(b * seq, 12, 2560)
+
                     line_z_values.append(z)
                 cache[line] = line_z_values
 
@@ -187,11 +196,13 @@ class Qwen3VLTextProcessingEngine:
     def process_tokens(self, batch_tokens, batch_multipliers):
         embeds, mask, count, info = self.process_embeds(batch_tokens)
 
-        self.emphasis.tokens = batch_tokens
-        self.emphasis.multipliers = torch.asarray(batch_multipliers).to(embeds)
-        self.emphasis.z = embeds
-        self.emphasis.after_transformers()
-        embeds = self.emphasis.z
+        if embeds.size(1) == len(batch_multipliers[0]):
+            # images would cause the length to be different...
+            self.emphasis.tokens = batch_tokens
+            self.emphasis.multipliers = torch.asarray(batch_multipliers).to(embeds)
+            self.emphasis.z = embeds
+            self.emphasis.after_transformers()
+            embeds = self.emphasis.z
 
         _, z = self.text_encoder(None, embeds=embeds, attention_mask=mask, num_tokens=count, embeds_info=info, intermediate_output=KREA2_TAP_LAYERS, final_layer_norm_intermediate=False)
         return z

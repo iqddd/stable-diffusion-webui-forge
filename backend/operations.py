@@ -10,7 +10,6 @@ import torch
 
 from backend import memory_management, stream, utils
 from backend.args import args, dynamic_args
-from backend.patcher.lora import merge_lora_to_weight
 
 
 def scaled_dot_product_attention(q, k, v, *args, **kwargs):
@@ -45,17 +44,14 @@ except Exception:
 
 def get_weight_and_bias(layer: torch.nn.Module) -> tuple[torch.Tensor, torch.Tensor]:
     """Forge-Specific Function for on-the-fly LoRA"""
-    loras: dict[str, list] = getattr(layer, "forge_online_loras", dict())
 
     weight: torch.Tensor = getattr(layer, "weight", None)
-    weight_patches: list = loras.get("weight", None)
-    if weight is not None and weight_patches is not None:
-        weight = merge_lora_to_weight(patches=weight_patches, weight=weight, key="online_weight_lora", computation_dtype=weight.dtype)
+    for f in getattr(layer, "weight_function", []):
+        weight = f(weight)
 
     bias: torch.Tensor = getattr(layer, "bias", None)
-    bias_patches: list = loras.get("bias", None)
-    if bias is not None and bias_patches is not None:
-        bias = merge_lora_to_weight(patches=bias_patches, weight=bias, key="online_bias_lora", computation_dtype=bias.dtype)
+    for f in getattr(layer, "bias_function", []):
+        bias = f(bias)
 
     return weight, bias
 
@@ -71,6 +67,8 @@ def weights_manual_cast(
     bias_fn: Callable = None,
     skip_weight_dtype: bool = False,
     skip_bias_dtype: bool = False,
+    apply_weight_functions: bool = True,
+    apply_bias_functions: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, tuple]:
     """
     Cast layer to input dtype/device
@@ -85,8 +83,8 @@ def weights_manual_cast(
     non_blocking = memory_management.device_supports_non_blocking(target_device)
     weight, bias = None, None
 
-    weight_has_function: bool = len(layer.weight_function) > 0 or weight_fn is not None
-    bias_has_function: bool = len(layer.bias_function) > 0 or bias_fn is not None
+    weight_has_function: bool = (apply_weight_functions and len(layer.weight_function) > 0) or weight_fn is not None
+    bias_has_function: bool = (apply_bias_functions and len(layer.bias_function) > 0) or bias_fn is not None
 
     weight_args = dict(device=target_device, dtype=dtype or target_dtype, non_blocking=non_blocking)
     if skip_weight_dtype or weight_has_function:
@@ -125,31 +123,24 @@ def weights_manual_cast(
     bias_a = bias
 
     if weight_has_function:
+        if isinstance(weight, QuantizedTensor):
+            weight = weight.dequantize()
         if weight_fn is not None:
             weight = weight_fn(weight)
         if not skip_weight_dtype:
             weight = weight.to(dtype=target_dtype)
-        for f in layer.weight_function:
-            weight = f(weight)
+        if apply_weight_functions:
+            for f in layer.weight_function:
+                weight = f(weight)
 
     if bias_has_function:
         if bias_fn is not None:
             bias = bias_fn(bias)
         if not skip_bias_dtype:
             bias = bias.to(dtype=target_dtype)
-        for f in layer.bias_function:
-            bias = f(bias)
-
-    loras: dict[str, list[torch.Tensor]] = getattr(layer, "forge_online_loras", dict())
-
-    weight_patches = loras.get("weight", None)
-    bias_patches = loras.get("bias", None)
-
-    if weight is not None and weight_patches is not None:
-        weight = merge_lora_to_weight(patches=weight_patches, weight=weight, key="online_weight_lora", computation_dtype=weight.dtype)
-
-    if bias is not None and bias_patches is not None:
-        bias = merge_lora_to_weight(patches=bias_patches, weight=bias, key="online_bias_lora", computation_dtype=bias.dtype)
+        if apply_bias_functions:
+            for f in layer.bias_function:
+                bias = f(bias)
 
     return weight, bias, (offload_stream, weight_a, bias_a)
 
@@ -188,7 +179,6 @@ def main_stream_worker(weight, bias, offload_stream: tuple[torch.Stream, torch.T
 current_device: torch.device = None
 current_dtype: torch.dtype = None
 current_manual_cast_enabled: bool = False
-current_bnb_dtype: str = None
 
 
 # region Forge OPs
@@ -379,48 +369,6 @@ class ForgeOperations:
                 return super().forward(x)
 
 
-# region BnB
-
-
-if memory_management.bnb_enabled():
-
-    from backend.operations_bnb import (
-        ForgeLoader4Bit,
-        functional_dequantize_4bit,
-        functional_linear_4bits,
-    )
-
-    class ForgeOperationsBNB4bits(ForgeOperations):
-        class Linear(ForgeLoader4Bit, ForgeWeights):
-            def __init__(self, *args, **kwargs):
-                super().__init__(device=current_device, dtype=current_dtype, quant_type=current_bnb_dtype)
-                self.parameters_manual_cast = current_manual_cast_enabled
-
-            def forward(self, x):
-                if self.bias is not None and self.bias.dtype != x.dtype:
-                    self.bias = utils.tensor2parameter(self.bias.to(x.dtype))
-
-                if hasattr(self, "forge_online_loras"):
-                    weight, bias, signal = weights_manual_cast(self, x, weight_fn=functional_dequantize_4bit, skip_bias_dtype=True)
-                    with main_stream_worker(weight, bias, signal):
-                        return torch.nn.functional.linear(x, weight, bias)
-
-                if not self.parameters_manual_cast:
-                    return functional_linear_4bits(x, self.weight, self.bias)
-                elif not self.weight.bnb_quantized:
-                    assert x.device.type == "cuda", "BnB must use CUDA as Computation Device"
-                    layer_original_device = self.weight.device
-                    self.weight = self.weight._quantize(x.device)
-                    bias = self.bias.to(x.device) if self.bias is not None else None
-                    out = functional_linear_4bits(x, self.weight, bias)
-                    self.weight = self.weight.to(layer_original_device)
-                    return out
-                else:
-                    weight, bias, signal = weights_manual_cast(self, x, skip_weight_dtype=True, skip_bias_dtype=True)
-                    with main_stream_worker(weight, bias, signal):
-                        return functional_linear_4bits(x, weight, bias)
-
-
 # region GGUF
 
 
@@ -567,53 +515,83 @@ from backend.operations_mixed_precision import (
 
 
 def _fp8_prepare_online_lora(linear: torch.nn.Linear, x: torch.Tensor):
-    loras: dict[str, list[torch.Tensor]] = getattr(linear, "forge_online_loras", {})
-    if not loras:
-        return None, None, True
+    # Runtime imports avoid a module cycle while keeping this fast path tied to
+    # the same patch types used by ModelPatcher.
+    from backend.patcher.base import WeightPatch
+    from modules_forge.packages.comfy.weight_adapter.lora import LoRAAdapter
 
-    weight_patches = loras.get("weight", None)
-    bias_patches = loras.get("bias", None)
+    weight_functions = tuple(getattr(linear, "weight_function", ()))
+    bias_functions = tuple(getattr(linear, "bias_function", ()))
 
-    if bias_patches:
+    if bias_functions:
         return None, None, False
-
-    if not weight_patches:
+    if not weight_functions:
         return None, None, True
-
-    cache_key = (id(weight_patches), x.device, x.dtype)
-    if getattr(linear, "_forge_fp8_lora_cache_key", None) == cache_key:
-        return linear._forge_fp8_lora_A, linear._forge_fp8_lora_B, True
 
     all_a = []
     all_b = []
+    signature = []
 
-    for patch in weight_patches:
-        if not isinstance(patch, (tuple, list)) or len(patch) < 5:
+    for weight_patch in weight_functions:
+        if not isinstance(weight_patch, WeightPatch):
+            return None, None, False
+        if weight_patch.convert_func is not None or weight_patch.set_func is not None:
             return None, None, False
 
-        strength, adapter, strength_model, offset, function = patch[:5]
-
-        if strength == 0:
-            continue
-        if strength_model != 1.0 or offset is not None or function is not None:
+        patches = weight_patch.patches.get(weight_patch.key)
+        if not isinstance(patches, list):
             return None, None, False
 
-        if getattr(adapter, "name", None) != "lora" or not hasattr(adapter, "weights"):
-            return None, None, False
+        for patch in patches:
+            if not isinstance(patch, (tuple, list)) or len(patch) < 5:
+                return None, None, False
 
-        up, down, alpha, mid, dora_scale, reshape = adapter.weights
-        if dora_scale is not None or reshape is not None:
-            return None, None, False
+            strength, adapter, strength_model, offset, function = patch[:5]
+            strength = float(strength)
+            strength_model = float(strength_model)
 
-        rank = down.shape[0] if down.ndim >= 2 else 1
-        scale = strength * ((alpha / rank) if alpha is not None else 1.0)
+            if strength_model != 1.0 or offset is not None or function is not None:
+                return None, None, False
+            if not isinstance(adapter, LoRAAdapter):
+                return None, None, False
 
-        curr_a = down
-        if mid is not None:
-            curr_a = torch.mm(mid.flatten(start_dim=1), down.flatten(start_dim=1)).reshape(down.shape)
+            up, down, alpha, mid, dora_scale, reshape = adapter.weights
+            if mid is not None or dora_scale is not None or reshape is not None:
+                return None, None, False
+            if not isinstance(up, torch.Tensor) or not isinstance(down, torch.Tensor):
+                return None, None, False
+            if up.ndim != 2 or down.ndim != 2:
+                return None, None, False
+            if up.shape[1] != down.shape[0] or down.shape[1] != linear.in_features or up.shape[0] != linear.out_features:
+                return None, None, False
 
-        all_a.append(curr_a.flatten(start_dim=1) * scale)
-        all_b.append(up.flatten(start_dim=1))
+            alpha_value = None if alpha is None else float(alpha)
+            signature.append(
+                (
+                    id(weight_patch),
+                    weight_patch.key,
+                    id(adapter),
+                    strength,
+                    strength_model,
+                    alpha_value,
+                    id(up),
+                    up._version,
+                    id(down),
+                    down._version,
+                )
+            )
+
+            if strength == 0.0:
+                continue
+
+            rank = down.shape[0]
+            scale = strength * ((alpha_value / rank) if alpha_value is not None else 1.0)
+            all_a.append(down * scale)
+            all_b.append(up)
+
+    cache_key = (tuple(signature), x.device, x.dtype)
+    if getattr(linear, "_forge_fp8_lora_cache_key", None) == cache_key:
+        return linear._forge_fp8_lora_A, linear._forge_fp8_lora_B, True
 
     if not all_a:
         linear._forge_fp8_lora_cache_key = cache_key
@@ -641,27 +619,22 @@ def fp8_linear(self: torch.nn.Linear, input: torch.Tensor):
     input_shape = input.shape
     tensor_3d = input.ndim == 3
 
-    if tensor_3d:
-        lora_input = input.reshape(-1, input_shape[2])
-        lora_a, lora_b, lora_supported = _fp8_prepare_online_lora(self, input)
-        if not lora_supported:
-            return None
-        input = input.reshape(-1, input_shape[2])
-    else:
-        lora_a = None
-        lora_b = None
+    if input.ndim not in (2, 3):
+        return None
 
-    if input.ndim != 2:
+    input = input.reshape(-1, input_shape[-1])
+    lora_input = input
+    lora_a, lora_b, lora_supported = _fp8_prepare_online_lora(self, input)
+    if not lora_supported:
         return None
 
     scale_weight = torch.ones((), device=input.device, dtype=torch.float32)
     scale_input = torch.ones((), device=input.device, dtype=torch.float32)
 
-    w, bias, signal = weights_manual_cast(self, input, dtype=dtype)
+    w, bias, signal = weights_manual_cast(self, input, dtype=dtype, apply_weight_functions=False, apply_bias_functions=False)
 
     with main_stream_worker(w, bias, signal):
-        input = torch.clamp(input, min=-448, max=448, out=input)
-        input_fp8 = input.to(dtype).contiguous()
+        input_fp8 = input.clamp(min=-448, max=448).to(dtype).contiguous()
         layout_params_input = TensorCoreFP8Layout.Params(scale=scale_input, orig_dtype=input_dtype, orig_shape=tuple(input_fp8.shape))
         quantized_input = QuantizedTensor(input_fp8, "TensorCoreFP8Layout", layout_params_input)
 
@@ -689,7 +662,7 @@ class ForgeOperationsFP8(ForgeOperations):
             except Exception as e:
                 memory_management.logger.error(f"Error during fp8_fast: {e}")
 
-            if getattr(self, "forge_online_loras", None):
+            if getattr(self, "weight_function", None) or getattr(self, "bias_function", None):
                 return ForgeOperations.Linear.forward(self, x)
 
             return super().forward(x)
@@ -749,12 +722,12 @@ class TiledOperations(ForgeOperations):
 
 
 @contextlib.contextmanager
-def using_forge_operations(operations=None, device=None, dtype=None, manual_cast_enabled=False, bnb_dtype=None):
-    global current_device, current_dtype, current_manual_cast_enabled, current_bnb_dtype
+def using_forge_operations(operations=None, device=None, dtype=None, manual_cast_enabled=False, extra_dtype=None):
+    global current_device, current_dtype, current_manual_cast_enabled
 
-    current_device, current_dtype, current_manual_cast_enabled, current_bnb_dtype = device, dtype, manual_cast_enabled, bnb_dtype
+    current_device, current_dtype, current_manual_cast_enabled = device, dtype, manual_cast_enabled
 
-    if isinstance(bnb_dtype, dict):
+    if isinstance(extra_dtype, dict):
         # https://github.com/Comfy-Org/ComfyUI/blob/v0.16.4/comfy/ops.py#L950
 
         _device = memory_management.get_torch_device()
@@ -772,16 +745,13 @@ def using_forge_operations(operations=None, device=None, dtype=None, manual_cast
             disabled.add("float8_e4m3fn")
             disabled.add("float8_e5m2")
 
-        _full: bool = bnb_dtype.pop("TE", False)  # https://github.com/Comfy-Org/ComfyUI/blob/v0.16.4/comfy/sd1_clip.py#L114
-        operations = mixed_precision_ops(quant_config=bnb_dtype, compute_dtype=_dtype, full_precision_mm=_full, disabled=disabled)
+        _full: bool = extra_dtype.pop("TE", False)  # https://github.com/Comfy-Org/ComfyUI/blob/v0.16.4/comfy/sd1_clip.py#L114
+        operations = mixed_precision_ops(quant_config=extra_dtype, compute_dtype=_dtype, full_precision_mm=_full, disabled=disabled)
 
     if operations is None:
-        if bnb_dtype in ["gguf"]:
+        if extra_dtype in ["gguf"]:
             operations = ForgeOperationsGGUF
-        elif bnb_dtype in ["nf4", "fp4"]:
-            assert memory_management.bnb_enabled(), 'Install the "bitsandbytes" package with --bnb'
-            operations = ForgeOperationsBNB4bits
-        elif bnb_dtype in ["vae"] and args.tiled_conv2d:
+        elif extra_dtype in ["vae"] and args.tiled_conv2d:
             memory_management.logger.info(f"Using TiledOperations ({args.tiled_conv2d}) for VAE")
             operations = TiledOperations
         elif dtype is torch.float8_e4m3fn and args.fast_fp8 and memory_management.supports_fp8_compute(memory_management.get_torch_device()):

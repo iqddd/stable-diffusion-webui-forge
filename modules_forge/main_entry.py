@@ -6,7 +6,6 @@ import torch
 from gradio.context import Context
 from rich import print_json
 
-from backend import memory_management
 from backend.args import dynamic_args
 from backend.logging import setup_logger
 from modules import (
@@ -37,16 +36,6 @@ forge_unet_storage_dtype_options: dict[str, tuple[torch.dtype, bool]] = {
     "float8-e5m2 (fp16 LoRA)": (torch.float8_e5m2, True),
 }
 
-if memory_management.bnb_enabled():
-    forge_unet_storage_dtype_options.update(
-        {
-            "bnb-nf4": ("nf4", False),
-            "bnb-nf4 (fp16 LoRA)": ("nf4", True),
-            "bnb-fp4": ("fp4", False),
-            "bnb-fp4 (fp16 LoRA)": ("fp4", True),
-        }
-    )
-
 
 module_list: dict[str, os.PathLike] = {}
 
@@ -60,7 +49,7 @@ def make_checkpoint_manager_ui():
         if len(sd_models.checkpoints_list) > 0:
             shared.opts.set("sd_model_checkpoint", next(iter(sd_models.checkpoints_list.values())).name)
 
-    ui_forge_preset = gr.Dropdown(label="UI Preset", value=lambda: shared.opts.forge_preset, choices=PresetArch.choices(), elem_id="forge_ui_preset")
+    ui_forge_preset = gr.Dropdown(label="UI Preset", value=shared.opts.forge_preset, choices=PresetArch.choices(), elem_id="forge_ui_preset")
 
     ui_checkpoint = gr.Dropdown(label="Checkpoint", value=None, choices=None, elem_id="setting_sd_model_checkpoint", elem_classes=["model_selection"])
 
@@ -74,7 +63,7 @@ def make_checkpoint_manager_ui():
     refresh_button.click(fn=refresh_model_list, outputs=[ui_checkpoint, ui_vae], queue=False)
     Context.root_block.load(fn=refresh_model_list, outputs=[ui_checkpoint, ui_vae], queue=False)
 
-    ui_forge_unet_dtype = gr.Dropdown(label="Diffusion in Low Bits", value=lambda: shared.opts.forge_unet_storage_dtype, choices=list(forge_unet_storage_dtype_options.keys()), elem_id="forge_ui_dtype")
+    ui_forge_unet_dtype = gr.Dropdown(label="Diffusion in Low Bits", value=None, choices=list(forge_unet_storage_dtype_options.keys()), elem_id="forge_ui_dtype")
 
     ui_checkpoint.input(checkpoint_change, inputs=[ui_checkpoint, ui_forge_preset], queue=False, show_progress=False)
     ui_vae.input(modules_change, inputs=[ui_vae, ui_forge_preset], queue=False, show_progress=False)
@@ -141,6 +130,8 @@ def refresh_model_loading_parameters(*, refresh: bool = True):
 
     dynamic_args.online_lora = lora_fp16
     logger.info(f"Patch LoRAs on-the-fly: {lora_fp16}")
+    if not ckpt.endswith(("gguf", "GGUF")) and lora_fp16:
+        logger.warning("on-the-fly WILL be slower ; enable only if you know what you are doing")
 
     processing.need_global_unload = True
 

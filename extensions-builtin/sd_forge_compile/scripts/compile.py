@@ -18,7 +18,7 @@ from backend.utils import get_attr, set_attr_raw
 from modules import scripts
 
 try:
-    import triton
+    import triton  # noqa: F401
 except ImportError:
     TRITON_AVAILABLE = False
 else:
@@ -187,13 +187,13 @@ class TorchCompileForForge(scripts.Script):
             case "guard_filter_fn":
                 config = dict(backend="inductor", dynamic=False, fullgraph=False, options={"guard_filter_fn": skip_torch_compile_dict})
             case "dynamic":
-                config = dict(backend="inductor", dynamic=True, fullgraph=False)
+                config = dict(backend="inductor", dynamic=True, fullgraph=False, options={"guard_filter_fn": skip_torch_compile_dict})
             case "max-autotune":
-                config = dict(backend="inductor", dynamic=False, fullgraph=False, options={"coordinate_descent_tuning": True, "max_autotune": True, "triton.cudagraphs": True})
+                config = dict(backend="inductor", dynamic=False, fullgraph=False, options={"guard_filter_fn": skip_torch_compile_dict, "coordinate_descent_tuning": True, "max_autotune": True, "triton.cudagraphs": True})
             case "max-autotune-no-cudagraphs":
-                config = dict(backend="inductor", dynamic=True, fullgraph=False, options={"coordinate_descent_tuning": True, "max_autotune": True})
+                config = dict(backend="inductor", dynamic=True, fullgraph=False, options={"guard_filter_fn": skip_torch_compile_dict, "coordinate_descent_tuning": True, "max_autotune": True})
             case "reduce-overhead":
-                config = dict(backend="inductor", mode="reduce-overhead", dynamic=False, fullgraph=False)
+                config = dict(backend="inductor", mode="reduce-overhead", dynamic=False, fullgraph=False, options={"guard_filter_fn": skip_torch_compile_dict})
 
         self._wrap_apply_model(kmodel, config)
         setattr(kmodel, _COMPILE_CONFIG_KEY, preset)
@@ -208,8 +208,13 @@ class TorchCompileForForge(scripts.Script):
         @wraps(original_apply_model)
         def apply_model_with_compile(*args, **kwargs):
             orig_model = get_attr(kmodel, "diffusion_model")
-            compiled = torch.compile(orig_model, **compile_config)
+
+            if not hasattr(kmodel, "_forge_compiled_model"):
+                setattr(kmodel, "_forge_compiled_model", torch.compile(orig_model, **compile_config))
+
+            compiled = getattr(kmodel, "_forge_compiled_model")
             set_attr_raw(kmodel, "diffusion_model", compiled)
+
             try:
                 return original_apply_model(*args, **kwargs)
             finally:
@@ -220,6 +225,9 @@ class TorchCompileForForge(scripts.Script):
 
     @staticmethod
     def _remove_compile_wrapper(kmodel: "KModel"):
+        if hasattr(kmodel, "_forge_compiled_model"):
+            delattr(kmodel, "_forge_compiled_model")
+
         if (orig := getattr(kmodel, _ORIG_APPLY_KEY, None)) is not None:
             if getattr(kmodel.apply_model, _COMPILE_WRAPPER_KEY, False):
                 kmodel.apply_model = orig

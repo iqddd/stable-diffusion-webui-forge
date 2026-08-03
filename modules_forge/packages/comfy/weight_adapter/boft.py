@@ -81,12 +81,14 @@ class BOFTAdapter(WeightAdapterBase):
             # for Q = -Q^T
             q = blocks - blocks.transpose(-1, -2)
             normed_q = q
-            if alpha > 0:  # alpha in boft/bboft is for constraint
+            # alpha in boft/bboft is the constraint, lycoris stores it unscaled
+            constraint = alpha * block_num * boft_b
+            if constraint > 0:
                 q_norm = torch.norm(q) + 1e-8
-                if q_norm > alpha:
-                    normed_q = q * alpha / q_norm
-            # Scale the skew-symmetric generator before Cayley so the
-            # intermediate strength still produces an orthogonal rotation.
+                if q_norm > constraint:
+                    normed_q = q * constraint / q_norm
+            # Apply strength to the skew-symmetric generator so the Cayley
+            # transform remains an orthogonal rotation at partial strength.
             q_strength = normed_q * strength
             # use float() to prevent unsupported type in .inverse()
             r = (I + q_strength) @ (I - q_strength).float().inverse()
@@ -103,8 +105,6 @@ class BOFTAdapter(WeightAdapterBase):
                 inp = inp.flatten(0, 1).unflatten(0, (-1, k, g)).transpose(1, 2).flatten(0, 2)
 
             if rescale is not None:
-                # Rescale is not orthogonal by itself, so interpolate it
-                # separately toward identity for smooth strength control.
                 inp = inp * (1 + strength * (rescale - 1))
 
             lora_diff = inp - org
@@ -114,5 +114,11 @@ class BOFTAdapter(WeightAdapterBase):
             else:
                 weight += function(lora_diff.type(weight.dtype))
         except Exception as e:
+            from backend.memory_management import is_oom
+
+            if is_oom(e):
+                raise
+
             logging.error("ERROR {} {} {}".format(self.name, key, e))
+
         return weight

@@ -4,7 +4,6 @@ from huggingface_guess import model_list
 from backend import memory_management
 from backend.args import dynamic_args
 from backend.diffusion_engine.base import ForgeDiffusionEngine, ForgeObjects
-from backend.modules.k_prediction import PredictionDiscreteFlow
 from backend.nn.unet import Timestep
 from backend.patcher.clip import CLIP
 from backend.patcher.unet import UnetPatcher
@@ -23,7 +22,7 @@ class Mugen(ForgeDiffusionEngine):
 
         vae = VAE(model=huggingface_components["vae"], is_mugen=True)
 
-        k_predictor = PredictionDiscreteFlow(estimated_config)
+        k_predictor = self._get_predictor()
         unet = UnetPatcher.from_model(model=huggingface_components["unet"], diffusers_scheduler=None, k_predictor=k_predictor, config=estimated_config)
 
         self.text_processing_engine_l = ClassicTextProcessingEngine(
@@ -106,15 +105,3 @@ class Mugen(ForgeDiffusionEngine):
     def get_prompt_lengths_on_ui(self, prompt):
         _, token_count = self.text_processing_engine_l.process_texts([prompt])
         return token_count, self.text_processing_engine_l.get_target_prompt_token_count(token_count)
-
-    @torch.inference_mode()
-    def encode_first_stage(self, x):
-        sample = self.forge_objects.vae.encode(x.movedim(1, -1) * 0.5 + 0.5)
-        sample = self.forge_objects.vae.first_stage_model.process_in(sample)
-        return sample.to(x)
-
-    @torch.inference_mode()
-    def decode_first_stage(self, x):
-        sample = self.forge_objects.vae.first_stage_model.process_out(x)
-        sample = self.forge_objects.vae.decode(sample).movedim(-1, 1) * 2.0 - 1.0
-        return sample.to(x)

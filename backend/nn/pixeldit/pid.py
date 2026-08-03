@@ -1,4 +1,4 @@
-# https://github.com/Comfy-Org/ComfyUI/blob/v0.24.1/comfy/ldm/pixeldit/pid.py
+# https://github.com/Comfy-Org/ComfyUI/blob/v0.28.0/comfy/ldm/pixeldit/pid.py
 
 import torch
 import torch.nn as nn
@@ -89,10 +89,8 @@ class LQProjection2D(nn.Module):
             nn.SiLU(),
             nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1, padding_mode=conv_padding_mode),
         ]
-
         for _ in range(num_res_blocks):
             layers.append(ResBlock(hidden_dim, conv_padding_mode=conv_padding_mode))
-
         self.latent_proj = nn.Sequential(*layers)
 
         self.output_heads = nn.ModuleList([nn.Linear(hidden_dim, out_dim) for _ in range(num_outputs)])
@@ -168,6 +166,7 @@ class PidNet(PixDiT_T2I):
             blk._rope_fn = _pit_rope_fn
 
         self.pit_lq_inject = pit_lq_inject
+
         num_lq_outputs = (self.patch_depth + lq_interval - 1) // lq_interval
         self.lq_proj = LQProjection2D(
             latent_channels=lq_latent_channels,

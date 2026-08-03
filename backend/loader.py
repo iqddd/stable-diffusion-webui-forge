@@ -102,7 +102,7 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
             config = IntegratedAutoencoderKL.load_config(config_path)
 
             with no_init_weights():
-                with using_forge_operations(device=memory_management.cpu, dtype=memory_management.vae_dtype(), bnb_dtype="vae"):
+                with using_forge_operations(device=memory_management.cpu, dtype=memory_management.vae_dtype(), extra_dtype="vae"):
                     model = IntegratedAutoencoderKL.from_config(config)
 
             load_state_dict(model, state_dict, ignore_start="loss.")
@@ -117,7 +117,7 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
                 config["dch"] = 96
 
             with no_init_weights():
-                with using_forge_operations(device=memory_management.cpu, dtype=memory_management.vae_dtype(), bnb_dtype="vae"):
+                with using_forge_operations(device=memory_management.cpu, dtype=memory_management.vae_dtype(), extra_dtype="vae"):
                     model = AutoencoderKLFlux2.from_config(config)
 
             load_state_dict(model, state_dict, ignore_start="loss.")
@@ -136,7 +136,7 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
                 config = WanVAE.load_config(config_path)
 
             with no_init_weights():
-                with using_forge_operations(device=memory_management.cpu, dtype=memory_management.vae_dtype(), bnb_dtype="vae"):
+                with using_forge_operations(device=memory_management.cpu, dtype=memory_management.vae_dtype(), extra_dtype="vae"):
                     model = WanVAE.from_config(config)
 
             load_state_dict(model, state_dict)
@@ -185,11 +185,11 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
             if storage_dtype in ["nf4", "fp4", "gguf"]:
                 with no_init_weights():
-                    with using_forge_operations(device=memory_management.cpu, dtype=memory_management.text_encoder_dtype(), manual_cast_enabled=True, bnb_dtype=storage_dtype):
+                    with using_forge_operations(device=memory_management.cpu, dtype=memory_management.text_encoder_dtype(), manual_cast_enabled=True, extra_dtype=storage_dtype):
                         model = Qwen25_7BVLI(config)
             else:
                 with no_init_weights():
-                    with using_forge_operations(device=memory_management.cpu, dtype=storage_dtype, manual_cast_enabled=True, bnb_dtype=quant_config):
+                    with using_forge_operations(device=memory_management.cpu, dtype=storage_dtype, manual_cast_enabled=True, extra_dtype=quant_config):
                         model = Qwen25_7BVLI(config)
 
             load_state_dict(model, state_dict, log_name=cls_name, ignore_start="lm_head.")
@@ -219,11 +219,11 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
             if storage_dtype in ["nf4", "fp4", "gguf"]:
                 with no_init_weights():
-                    with using_forge_operations(device=memory_management.cpu, dtype=memory_management.text_encoder_dtype(), manual_cast_enabled=False, bnb_dtype=storage_dtype):
+                    with using_forge_operations(device=memory_management.cpu, dtype=memory_management.text_encoder_dtype(), manual_cast_enabled=False, extra_dtype=storage_dtype):
                         model = Gemma2_2B(config)
             else:
                 with no_init_weights():
-                    with using_forge_operations(device=memory_management.cpu, dtype=storage_dtype, manual_cast_enabled=True, bnb_dtype=quant_config):
+                    with using_forge_operations(device=memory_management.cpu, dtype=storage_dtype, manual_cast_enabled=True, extra_dtype=quant_config):
                         model = Gemma2_2B(config)
 
             load_state_dict(model, state_dict, log_name=cls_name, ignore_start="lm_head.")
@@ -253,11 +253,11 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
             if storage_dtype in ["nf4", "fp4", "gguf"]:
                 with no_init_weights():
-                    with using_forge_operations(device=memory_management.cpu, dtype=memory_management.text_encoder_dtype(), manual_cast_enabled=False, bnb_dtype=storage_dtype):
+                    with using_forge_operations(device=memory_management.cpu, dtype=memory_management.text_encoder_dtype(), manual_cast_enabled=False, extra_dtype=storage_dtype):
                         model = Ministral3_3B(config)
             else:
                 with no_init_weights():
-                    with using_forge_operations(device=memory_management.cpu, dtype=storage_dtype, manual_cast_enabled=True, bnb_dtype=quant_config):
+                    with using_forge_operations(device=memory_management.cpu, dtype=storage_dtype, manual_cast_enabled=True, extra_dtype=quant_config):
                         model = Ministral3_3B(config)
 
             load_state_dict(model, state_dict, log_name=cls_name)
@@ -294,11 +294,11 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
             if storage_dtype in ["nf4", "fp4", "gguf"]:
                 with no_init_weights():
-                    with using_forge_operations(device=memory_management.cpu, dtype=memory_management.text_encoder_dtype(), manual_cast_enabled=False, bnb_dtype=storage_dtype):
+                    with using_forge_operations(device=memory_management.cpu, dtype=memory_management.text_encoder_dtype(), manual_cast_enabled=False, extra_dtype=storage_dtype):
                         model = QTE(config)
             else:
                 with no_init_weights():
-                    with using_forge_operations(device=memory_management.cpu, dtype=storage_dtype, manual_cast_enabled=True, bnb_dtype=quant_config):
+                    with using_forge_operations(device=memory_management.cpu, dtype=storage_dtype, manual_cast_enabled=True, extra_dtype=quant_config):
                         model = QTE(config)
 
             if cls_name == "Qwen3VLModel":
@@ -348,11 +348,11 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
             if storage_dtype in ["nf4", "fp4", "gguf"]:
                 with no_init_weights():
-                    with using_forge_operations(device=memory_management.cpu, dtype=memory_management.text_encoder_dtype(), manual_cast_enabled=False, bnb_dtype=storage_dtype):
+                    with using_forge_operations(device=memory_management.cpu, dtype=memory_management.text_encoder_dtype(), manual_cast_enabled=False, extra_dtype=storage_dtype):
                         model = IntegratedT5(config)
             else:
                 with no_init_weights():
-                    with using_forge_operations(device=memory_management.cpu, dtype=storage_dtype, manual_cast_enabled=True, bnb_dtype=quant_config):
+                    with using_forge_operations(device=memory_management.cpu, dtype=storage_dtype, manual_cast_enabled=True, extra_dtype=quant_config):
                         model = IntegratedT5(config)
 
             load_state_dict(model, state_dict, log_name=cls_name, ignore_errors=["transformer.encoder.embed_tokens.weight", "logit_scale"])
@@ -441,7 +441,7 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
                 storage_dtype = torch.bfloat16
                 logger.info(f"Using Nunchaku Model Data Type: {storage_dtype}")
             elif quant_config is not None:
-                storage_dtype = state_dict_dtype
+                storage_dtype = torch.bfloat16
                 logger.info("Using MixedPrecision for Model")
             elif state_dict_dtype in [torch.float8_e4m3fn, torch.float8_e5m2, "nf4", "fp4", "gguf"]:
                 storage_dtype = state_dict_dtype
@@ -472,7 +472,7 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
                 to_args = dict(device=initial_device, dtype=computation_dtype)
 
                 with no_init_weights():
-                    with using_forge_operations(**to_args, manual_cast_enabled=need_manual_cast, bnb_dtype=storage_dtype):
+                    with using_forge_operations(**to_args, manual_cast_enabled=need_manual_cast, extra_dtype=storage_dtype):
                         model = model_loader(unet_config)
             else:
                 initial_device = memory_management.unet_initial_load_device(parameters=state_dict_parameters, dtype=storage_dtype)
@@ -481,25 +481,15 @@ def load_huggingface_component(guess, component_name, lib_name, cls_name, repo_p
 
                 if quant_config is not None:
                     extra_dtype = quant_config
-                    to_args.clear()
                 else:
                     extra_dtype = None
 
                 with no_init_weights():
-                    with using_forge_operations(**to_args, manual_cast_enabled=need_manual_cast, bnb_dtype=extra_dtype):
+                    with using_forge_operations(**to_args, manual_cast_enabled=need_manual_cast, extra_dtype=extra_dtype):
                         model = model_loader(unet_config).to(**to_args)
 
             model = pre_func(model)
             load_state_dict(model, state_dict)
-
-            # PiD v1.5 keeps its LQ projection branch in bf16 alongside an
-            # int8 mixed-precision backbone.  MixedPrecisionOps constructs
-            # unquantized Conv2d modules as fp32, so explicitly align this
-            # branch with the model's compute dtype after its weights load.
-            if cls_name == "PiDTransformer2DModel":
-                model.lq_proj.to(dtype=computation_dtype)
-                if model.pit_lq_gate is not None:
-                    model.pit_lq_gate.to(dtype=computation_dtype)
             # model = post_func(model)
 
             if hasattr(model, "_internal_dict"):
@@ -904,6 +894,8 @@ def forge_loader(sd: os.PathLike, additional_state_dicts: list[os.PathLike] = No
     backend.args.dynamic_args.klein = "klein" in repo_name
     backend.args.dynamic_args.wan = "Wan" in repo_name
     backend.args.dynamic_args.pid = "PiD" in repo_name
+    backend.args.dynamic_args.anima = "Anima" in repo_name
+    backend.args.dynamic_args.krea2 = "Krea-2" in repo_name
 
     if "xl" in repo_name and "rectified" in str(sd).lower():
         estimated_config.sampling_settings["RF"] = True

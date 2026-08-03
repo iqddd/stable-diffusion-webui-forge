@@ -886,7 +886,7 @@ class ScriptRunner:
             except Exception:
                 errors.report(f"Error running process_batch: {script.filename}", exc_info=True)
 
-    def process_before_every_sampling(self, p, **kwargs):
+    def process_before_every_sampling(self, p, **kwargs):  # noqa: F811
         for script in self.alwayson_scripts:
             try:
                 script_args = p.script_args[script.args_from : script.args_to]
@@ -1013,7 +1013,7 @@ class ScriptRunner:
             except Exception:
                 errors.report(f"Error running before_hr: {script.filename}", exc_info=True)
 
-    def setup_scrips(self, p, *, is_ui=True):
+    def setup_scripts(self, p, *, is_ui=True):
         for script in self.ordered_scripts("setup"):
             if not is_ui and script.setup_for_ui_only:
                 continue

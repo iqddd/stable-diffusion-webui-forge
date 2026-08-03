@@ -10,7 +10,6 @@ from huggingface_guess import model_list
 from backend import memory_management
 from backend.args import dynamic_args
 from backend.diffusion_engine.base import ForgeDiffusionEngine, ForgeObjects
-from backend.modules.k_prediction import PredictionDiscreteFlow
 from backend.patcher.clip import CLIP
 from backend.patcher.unet import UnetPatcher
 from backend.patcher.vae import VAE
@@ -28,7 +27,7 @@ class QwenImage(ForgeDiffusionEngine):
 
         vae = VAE(model=huggingface_components["vae"], is_wan=True)
 
-        k_predictor = PredictionDiscreteFlow(estimated_config)
+        k_predictor = self._get_predictor()
 
         unet = UnetPatcher.from_model(model=huggingface_components["transformer"], diffusers_scheduler=None, k_predictor=k_predictor, config=estimated_config)
 
@@ -53,7 +52,7 @@ class QwenImage(ForgeDiffusionEngine):
                 _references.insert(0, self.ini_latent)
                 self.ini_latent = None
 
-            if _references:
+            if dynamic_args.edit and bool(_references):
                 return self.get_learned_conditioning_with_image(prompt, _references)
             else:
                 dynamic_args.ref_latents.clear()
@@ -87,17 +86,20 @@ class QwenImage(ForgeDiffusionEngine):
         height = round(samples.shape[2] * scale_by)
 
         s = torch.nn.functional.interpolate(samples, size=(height, width), mode="area")
-        _vision = s.movedim(1, -1)
+        _vision = s.movedim(1, -1)[:, :, :, :3]
+
+        width = samples.shape[3]
+        height = samples.shape[2]
 
         if opts.qwen_vae_resize:
             total = int(1024 * 1024)
-            scale_by = math.sqrt(total / (samples.shape[3] * samples.shape[2]))
-            width = round(samples.shape[3] * scale_by / 32.0) * 32
-            height = round(samples.shape[2] * scale_by / 32.0) * 32
+            scale_by = math.sqrt(total / (width * height))
+            width *= scale_by
+            height *= scale_by
 
-            s = torch.nn.functional.interpolate(samples, size=(height, width), mode="area")
-        else:
-            s = samples.clone()
+        width = round(width / 16.0) * 16
+        height = round(height / 16.0) * 16
+        s = torch.nn.functional.interpolate(samples, size=(height, width), mode="area")
         sample = self.forge_objects.vae.encode(s.movedim(1, -1)[:, :, :, :3])
         _latent = self.forge_objects.vae.first_stage_model.process_in(sample)
 
@@ -107,23 +109,11 @@ class QwenImage(ForgeDiffusionEngine):
 
     @torch.inference_mode()
     def encode_first_stage(self, x: torch.Tensor):
-        if x.size(0) > 1:
-            x = x[0].unsqueeze(0)  # enforce batch_size of 1
-
-        start_image = x.movedim(1, -1) * 0.5 + 0.5
-        sample = self.forge_objects.vae.encode(start_image)
-        sample = self.forge_objects.vae.first_stage_model.process_in(sample)
-
         if dynamic_args.edit:
+            start_image = x[0].movedim(0, -1).mul(0.5).add(0.5).unsqueeze(0)
             if dynamic_args.is_referencing:
                 self.ref_latents.append(start_image.cpu())
             else:
                 self.ini_latent = start_image.cpu()
 
-        return sample.to(x)
-
-    @torch.inference_mode()
-    def decode_first_stage(self, x):
-        sample = self.forge_objects.vae.first_stage_model.process_out(x)
-        sample = self.forge_objects.vae.decode(sample).movedim(-1, 2) * 2.0 - 1.0
-        return sample.to(x)
+        return super().encode_first_stage(x)
