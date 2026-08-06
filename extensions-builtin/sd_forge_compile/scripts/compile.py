@@ -209,6 +209,18 @@ class TorchCompileForForge(scripts.Script):
         def apply_model_with_compile(*args, **kwargs):
             orig_model = get_attr(kmodel, "diffusion_model")
 
+            input_x = args[0] if args else kwargs.get("x")
+            if isinstance(input_x, torch.Tensor):
+                # Cache construction mutates modules and inspects Python LoRA objects;
+                # keep it outside Dynamo and let the compiled graph consume tensors only.
+                from backend.operations_mixed_precision import prepare_int8_convrot_online_lora_for_compile
+
+                prepare_int8_convrot_online_lora_for_compile(
+                    orig_model,
+                    input_x,
+                    compute_dtype=kmodel.computation_dtype,
+                )
+
             if not hasattr(kmodel, "_forge_compiled_model"):
                 setattr(kmodel, "_forge_compiled_model", torch.compile(orig_model, **compile_config))
 

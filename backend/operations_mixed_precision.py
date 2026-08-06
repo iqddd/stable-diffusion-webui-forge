@@ -42,6 +42,158 @@ else:
             from .quant_rotation import build_hadamard, rotate_activation
 
 
+_INT8_CONVROT_LORA_CACHE_PREFIX = "_forge_int8_convrot_lora_"
+
+
+def _tensor_cache_version(tensor: torch.Tensor):
+    try:
+        return tensor._version
+    except RuntimeError:
+        # Tensors created in inference_mode are immutable but have no version counter.
+        return None
+
+
+@torch.compiler.disable
+def _prepare_int8_convrot_online_lora(linear: torch.nn.Linear, x: torch.Tensor, group_size: int):
+    """Prepare additive classic LoRAs without materializing their full weight deltas."""
+    # Runtime imports avoid the operations/model-patcher import cycle.
+    from backend.patcher.base import WeightPatch
+    from modules_forge.packages.comfy.weight_adapter.lora import LoRAAdapter
+
+    def unsupported():
+        setattr(linear, f"{_INT8_CONVROT_LORA_CACHE_PREFIX}supported", False)
+        for suffix in ("matrix_key", "scale_key", "A", "B", "scales"):
+            setattr(linear, f"{_INT8_CONVROT_LORA_CACHE_PREFIX}{suffix}", None)
+        return None, None, None, False
+
+    weight_functions = tuple(getattr(linear, "weight_function", ()))
+    if not weight_functions:
+        setattr(linear, f"{_INT8_CONVROT_LORA_CACHE_PREFIX}supported", True)
+        return None, None, None, True
+    if tuple(getattr(linear, "bias_function", ())):
+        return unsupported()
+
+    adapters = []
+    matrix_signature = []
+    scale_signature = []
+
+    for weight_patch in weight_functions:
+        if not isinstance(weight_patch, WeightPatch):
+            return unsupported()
+
+        patches = weight_patch.patches.get(weight_patch.key)
+        if not isinstance(patches, list):
+            return unsupported()
+
+        for patch in patches:
+            if not isinstance(patch, (tuple, list)) or len(patch) < 6:
+                return unsupported()
+
+            strength, adapter, strength_model, offset, function, online = patch[:6]
+            if not online or float(strength_model) != 1.0 or offset is not None or function is not None:
+                return unsupported()
+            if not isinstance(adapter, LoRAAdapter):
+                return unsupported()
+
+            up, down, alpha, mid, dora_scale, reshape = adapter.weights
+            if mid is not None or dora_scale is not None or reshape is not None:
+                return unsupported()
+            if not isinstance(up, torch.Tensor) or not isinstance(down, torch.Tensor):
+                return unsupported()
+            if up.ndim != 2 or down.ndim != 2:
+                return unsupported()
+            if up.shape[1] != down.shape[0] or down.shape[1] != linear.in_features or up.shape[0] != linear.out_features:
+                return unsupported()
+            if down.shape[1] % group_size != 0:
+                return unsupported()
+
+            rank = down.shape[0]
+            if rank == 0:
+                return unsupported()
+            alpha_value = None if alpha is None else float(alpha)
+            gamma = float(strength) * ((alpha_value / rank) if alpha_value is not None else 1.0)
+            adapters.append((up, down, rank, gamma))
+            matrix_signature.append(
+                (
+                    id(adapter),
+                    id(up),
+                    _tensor_cache_version(up),
+                    tuple(up.shape),
+                    id(down),
+                    _tensor_cache_version(down),
+                    tuple(down.shape),
+                )
+            )
+            scale_signature.append((rank, gamma))
+
+    matrix_cache_key = (tuple(matrix_signature), x.device, x.dtype, group_size)
+    if getattr(linear, f"{_INT8_CONVROT_LORA_CACHE_PREFIX}matrix_key", None) != matrix_cache_key:
+        if adapters:
+            all_down = [cast_to_device(down, x.device, x.dtype) for _, down, _, _ in adapters]
+            all_up = [cast_to_device(up, x.device, x.dtype) for up, _, _, _ in adapters]
+            lora_a = torch.cat(all_down, dim=0) if len(all_down) > 1 else all_down[0]
+            lora_b = torch.cat(all_up, dim=1) if len(all_up) > 1 else all_up[0]
+            H = build_hadamard(group_size, device=x.device, dtype=x.dtype)
+            lora_a = rotate_activation(lora_a, H, group_size=group_size)
+        else:
+            lora_a = None
+            lora_b = None
+
+        setattr(linear, f"{_INT8_CONVROT_LORA_CACHE_PREFIX}matrix_key", matrix_cache_key)
+        setattr(linear, f"{_INT8_CONVROT_LORA_CACHE_PREFIX}A", lora_a)
+        setattr(linear, f"{_INT8_CONVROT_LORA_CACHE_PREFIX}B", lora_b)
+
+    scale_cache_key = (tuple(scale_signature), x.device)
+    if getattr(linear, f"{_INT8_CONVROT_LORA_CACHE_PREFIX}scale_key", None) != scale_cache_key:
+        # TODO(torch.compile): when ranks are unchanged, update this tensor in-place.
+        # Replacing the module attribute currently recompiles on strength-only changes.
+        if adapters:
+            rank_scales = torch.cat(
+                [torch.full((rank,), gamma, device=x.device, dtype=torch.float32) for _, _, rank, gamma in adapters]
+            )
+        else:
+            rank_scales = None
+        setattr(linear, f"{_INT8_CONVROT_LORA_CACHE_PREFIX}scale_key", scale_cache_key)
+        setattr(linear, f"{_INT8_CONVROT_LORA_CACHE_PREFIX}scales", rank_scales)
+
+    setattr(linear, f"{_INT8_CONVROT_LORA_CACHE_PREFIX}supported", True)
+    return (
+        getattr(linear, f"{_INT8_CONVROT_LORA_CACHE_PREFIX}A"),
+        getattr(linear, f"{_INT8_CONVROT_LORA_CACHE_PREFIX}B"),
+        getattr(linear, f"{_INT8_CONVROT_LORA_CACHE_PREFIX}scales"),
+        True,
+    )
+
+
+def prepare_int8_convrot_online_lora_for_compile(
+    model: torch.nn.Module,
+    x: torch.Tensor,
+    compute_dtype: torch.dtype | None = None,
+):
+    """Prepare online-LoRA tensors before entering a torch.compile'd diffusion model."""
+    if not TRITON_AVAILABLE or not isinstance(x, torch.Tensor):
+        return
+
+    compute_dtype = x.dtype if compute_dtype is None else compute_dtype
+    if compute_dtype is not torch.bfloat16:
+        return
+
+    cache_spec = x if x.dtype is compute_dtype else torch.empty((), device=x.device, dtype=compute_dtype)
+
+    for module in model.modules():
+        weight = getattr(module, "weight", None)
+        weight_params = getattr(weight, "params", None)
+        if (
+            getattr(module, "quant_format", None) == "int8_tensorwise"
+            and getattr(weight_params, "convrot", False)
+            and not getattr(module, "_full_precision_mm", True)
+            and not getattr(module, "forge_force_cast_weights", False)
+            and len(getattr(module, "weight_function", ())) > 0
+        ):
+            group_size = getattr(weight_params, "convrot_groupsize", 256)
+            _prepare_int8_convrot_online_lora(module, cache_spec, group_size)
+
+
 def _quantized_apply(module: torch.nn.Module, fn, recurse=True):
     if recurse:
         for child in module.children():
@@ -244,7 +396,34 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 input_shape = input.shape
                 reshaped_nd = False
 
-                _use_quantized = getattr(self, "layout_type", None) is not None and not isinstance(input, QuantizedTensor) and not self._full_precision_mm and not getattr(self, "forge_force_cast_weights", False) and len(self.weight_function) == 0 and len(self.bias_function) == 0
+                int8_convrot_lora = (None, None, None)
+                int8_convrot_lora_supported = False
+                weight_params = getattr(self.weight, "params", None)
+                if (
+                    TRITON_AVAILABLE
+                    and getattr(self, "quant_format", None) == "int8_tensorwise"
+                    and getattr(weight_params, "convrot", False)
+                    and not self._full_precision_mm
+                    and not getattr(self, "forge_force_cast_weights", False)
+                    and not isinstance(input, QuantizedTensor)
+                    and input.dtype is torch.bfloat16
+                    and len(self.weight_function) > 0
+                ):
+                    group_size = getattr(weight_params, "convrot_groupsize", 256)
+                    if torch.compiler.is_compiling():
+                        int8_convrot_lora_supported = getattr(
+                            self,
+                            f"{_INT8_CONVROT_LORA_CACHE_PREFIX}supported",
+                            False,
+                        )
+                        lora_a = getattr(self, f"{_INT8_CONVROT_LORA_CACHE_PREFIX}A", None)
+                        lora_b = getattr(self, f"{_INT8_CONVROT_LORA_CACHE_PREFIX}B", None)
+                        lora_scales = getattr(self, f"{_INT8_CONVROT_LORA_CACHE_PREFIX}scales", None)
+                    else:
+                        lora_a, lora_b, lora_scales, int8_convrot_lora_supported = _prepare_int8_convrot_online_lora(self, input, group_size)
+                    int8_convrot_lora = (lora_a, lora_b, lora_scales)
+
+                _use_quantized = getattr(self, "layout_type", None) is not None and not isinstance(input, QuantizedTensor) and not self._full_precision_mm and not getattr(self, "forge_force_cast_weights", False) and (len(self.weight_function) == 0 or int8_convrot_lora_supported) and len(self.bias_function) == 0
                 quantize_input = QUANT_ALGOS.get(getattr(self, "quant_format", None), {}).get("quantize_input", True)
 
                 assert not input.requires_grad
@@ -259,10 +438,26 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                             scale = cast_to_device(scale, input.device, None)
                         input = QuantizedTensor.from_float(input_reshaped, self.layout_type, scale=scale)
 
-                _double_cast = self.parameters_manual_cast and (len(self.weight_function) > 0 or len(self.bias_function) > 0)
+                _double_cast = self.parameters_manual_cast and ((len(self.weight_function) > 0 and not int8_convrot_lora_supported) or len(self.bias_function) > 0)
 
                 if TRITON_AVAILABLE and getattr(self, "quant_format", None) == "int8_tensorwise" and not (_double_cast or self._full_precision_mm):
-                    if len(self.weight_function) > 0 or len(self.bias_function) > 0:
+                    if int8_convrot_lora_supported:
+                        if self.weight.device == input.device:
+                            weight, bias, signal = self.weight._qdata, self.bias, None
+                        else:
+                            weight, bias, signal = weights_manual_cast(
+                                self,
+                                x=None,
+                                dtype=torch.int8,
+                                device=input.device,
+                                bias_dtype=input.dtype,
+                                apply_weight_functions=False,
+                                apply_bias_functions=False,
+                            )
+                            if isinstance(weight, QuantizedTensor):
+                                weight = weight._qdata
+                        scale: torch.Tensor = self.weight.params.scale.to(device=input.device, non_blocking=True)
+                    elif len(self.weight_function) > 0 or len(self.bias_function) > 0:
                         _weight, bias, signal = weights_manual_cast(self, x=None, dtype=self.weight.dtype, device=input.device, bias_dtype=input.dtype)
                         weight, params = TensorWiseINT8Layout.quantize(
                             tensor=_weight,
@@ -292,6 +487,13 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                             output = triton_int8_linear_per_row(input, weight, scale, bias, compute_dtype)
                         else:
                             output = triton_int8_linear(input, weight, scale, bias, compute_dtype)
+
+                    lora_a, lora_b, lora_scales = int8_convrot_lora
+                    if int8_convrot_lora_supported and lora_a is not None:
+                        lora_hidden = torch.nn.functional.linear(input, lora_a)
+                        lora_hidden.mul_(lora_scales)
+                        lora_output = torch.nn.functional.linear(lora_hidden, lora_b)
+                        output.add_(lora_output.to(dtype=output.dtype))
                 else:
                     weight_only_quant = _use_quantized and not quantize_input and isinstance(self.weight, QuantizedTensor)
 

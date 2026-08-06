@@ -75,7 +75,15 @@ def set_model_options_pre_cfg_function(model_options, pre_cfg_function, disable_
     return model_options
 
 
+def clear_weight_function_caches(m: "ForgeWeights"):
+    for name in tuple(vars(m)):
+        if name.startswith("_forge_int8_convrot_lora_"):
+            delattr(m, name)
+
+
 def reset_weight_functions(m: "ForgeWeights", *, wipe: bool = False):
+    clear_weight_function_caches(m)
+
     if hasattr(m, "prev_parameters_manual_cast"):
         m.parameters_manual_cast = m.prev_parameters_manual_cast
         del m.prev_parameters_manual_cast
@@ -502,6 +510,7 @@ class ModelPatcher:
             m.forge_force_cast_weights = self.force_cast_weights
             if lowvram_weight:
                 if hasattr(m, "parameters_manual_cast"):
+                    clear_weight_function_caches(m)
                     m.weight_function = []
                     m.bias_function = []
 
@@ -694,6 +703,7 @@ class ModelPatcher:
                             if force_patch_weights and not self.use_online_lora(weight_key):
                                 self.patch_weight_to_device(weight_key)
                             else:
+                                clear_weight_function_caches(m)
                                 _, set_func, convert_func = get_key_weight(self.model, weight_key)
                                 m.weight_function.append(WeightPatch(weight_key, self.patches, convert_func, set_func))
                                 patch_counter += 1
