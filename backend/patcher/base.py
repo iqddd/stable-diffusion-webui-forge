@@ -441,7 +441,10 @@ class ModelPatcher:
         loading = []
         for n, m in self.model.named_modules():
             default = False
-            params = {name: param for name, param in m.named_parameters(recurse=False)}
+            # Keep names only: quantized _apply replaces Parameters during .to().
+            # Holding their old values here retains an entire copy until load
+            # returns. Originals needed by offline LoRA belong to self.backup.
+            params = tuple(name for name, _ in m.named_parameters(recurse=False))
             for name, param in m.named_parameters(recurse=True):
                 if name not in params:
                     default = True

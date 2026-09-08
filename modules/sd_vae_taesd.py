@@ -7,7 +7,11 @@
 # reference:
 # - https://github.com/Comfy-Org/ComfyUI/blob/v0.21.0/comfy/taesd/taehv.py
 
+import logging
 import os
+import threading
+import time
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -26,6 +30,11 @@ from modules import devices, paths_internal, shared
 URL: str = "https://github.com/madebyollin/taesd/raw/main/"
 URL_V: str = "https://github.com/madebyollin/taehv/raw/main/"
 sd_vae_taesd_models: dict[str, nn.Module] = {}
+sd_vae_taesd_compiled_models: dict[tuple[int, str, torch.dtype], nn.Module] = {}
+sd_vae_taesd_compile_failures: set[tuple[int, str, torch.dtype]] = set()
+sd_vae_taesd_compile_lock = threading.Lock()
+
+logger = logging.getLogger(__name__)
 
 TWorkItem = namedtuple("TWorkItem", ("input_tensor", "block_index"))
 
@@ -214,6 +223,148 @@ class TAEHVDecoder(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         z = self.decoder.decode(x)
         return z.squeeze(1)
+
+
+class _TAEW2OneFrame(nn.Module):
+    """Compile-friendly specialization of TAEHV for one latent frame."""
+
+    def __init__(self, taehv: TAEHV):
+        super().__init__()
+        self.decoder = taehv.decoder
+
+    @staticmethod
+    def _memblocks(frames: list[torch.Tensor], blocks: nn.Sequential) -> list[torch.Tensor]:
+        states = [None] * len(blocks)
+        outputs = []
+        for frame in frames:
+            for index, block in enumerate(blocks):
+                previous_input = frame
+                previous_frame = previous_input * 0 if states[index] is None else states[index]
+                frame = block(frame, previous_frame)
+                states[index] = previous_input.detach().clone()
+            outputs.append(frame)
+        return outputs
+
+    def forward(self, latent: torch.Tensor) -> torch.Tensor:
+        d = self.decoder
+        batch = latent.shape[0]
+        value = latent[:, :, 0]
+        for index in range(3):
+            value = d[index](value)
+
+        value = self._memblocks([value], d[3:6])[0]
+        value = d[8](d[7](d[6](value)))
+        value = d[12](self._memblocks([value], d[9:12])[0])
+        value = d[14](d[13](value))
+
+        frames = list(value.view(batch, 2, value.shape[1], value.shape[2], value.shape[3]).unbind(1))
+        frames = self._memblocks(frames, d[15:18])
+        expanded = []
+        for frame in frames:
+            frame = d[19](d[18](frame))
+            expanded.extend(frame.view(batch, 2, frame.shape[1], frame.shape[2], frame.shape[3]).unbind(1))
+
+        # TAEHV trims the first three of the four generated temporal frames.
+        return d[22](d[21](d[20](expanded[-1])))
+
+
+def _compiled_decoder_key(model: nn.Module) -> tuple[int, str, torch.dtype]:
+    parameter = next(model.parameters())
+    return id(model), str(parameter.device), parameter.dtype
+
+
+def _supports_compiled_preview(model: nn.Module, sample: torch.Tensor) -> bool:
+    return isinstance(model, TAEHVDecoder) and sample.ndim == 5 and sample.shape[2] == 1
+
+
+def decoder_for_sample(model: nn.Module, sample: torch.Tensor) -> nn.Module:
+    """Select an already-prepared decoder without compiling on a progress thread."""
+    if not getattr(shared.opts, "live_preview_compile_taesd", False):
+        return model
+    if not _supports_compiled_preview(model, sample):
+        return model
+    return sd_vae_taesd_compiled_models.get(_compiled_decoder_key(model), model)
+
+
+@torch.inference_mode()
+def precompile_preview_decoder(sample: torch.Tensor) -> None:
+    """Compile and synchronously warm supported TAESD previews before sampling."""
+    if not getattr(shared.opts, "live_preview_compile_taesd", False):
+        return
+    if not shared.opts.live_previews_enable or shared.opts.show_progress_type != "TAESD":
+        return
+    if shared.opts.show_progress_every_n_steps == -1:
+        return
+    if sample.ndim != 5 or sample.shape[2] != 1:
+        return
+
+    latent_format: "LatentFormat" = shared.sd_model.model_config.latent_format
+    if latent_format.taesd_decoder_name != "taew2_1":
+        return
+
+    model = decoder_model()
+    if model is None or not _supports_compiled_preview(model, sample):
+        return
+
+    key = _compiled_decoder_key(model)
+    if key in sd_vae_taesd_compiled_models or key in sd_vae_taesd_compile_failures:
+        return
+
+    with sd_vae_taesd_compile_lock:
+        if key in sd_vae_taesd_compiled_models or key in sd_vae_taesd_compile_failures:
+            return
+
+        model_parameter = next(model.parameters())
+        compile_input = sample.detach().to(device=model_parameter.device, dtype=model_parameter.dtype)
+        start_time = time.perf_counter()
+        print(
+            "TAESD compile/warmup started: "
+            f"model=taew2_1.pth, input_shape={tuple(compile_input.shape)}, "
+            f"dtype={compile_input.dtype}, dynamic=True",
+            flush=True,
+        )
+
+        compiled = None
+        output = None
+        try:
+            unrolled = _TAEW2OneFrame(model.decoder).eval()
+            compiled = torch.compile(unrolled, backend="inductor", dynamic=True, fullgraph=True)
+            # Keep a square first generation from specializing H == W.  The
+            # detached input is private to TAESD, so these marks cannot affect
+            # compilation of the diffusion model using the original latent.
+            torch._dynamo.mark_dynamic(compile_input, 3)
+            torch._dynamo.mark_dynamic(compile_input, 4)
+
+            from backend import stream
+
+            vae_stream = getattr(shared.state, "vae_stream", None)
+            stream_context = nullcontext()
+            if vae_stream is not None:
+                vae_stream.wait_stream(stream.current_stream)
+                stream_context = stream.stream_context()(vae_stream)
+
+            with stream_context:
+                output = compiled(compile_input)
+
+            if vae_stream is not None:
+                vae_stream.synchronize()
+            elif compile_input.device.type == "cuda":
+                torch.cuda.synchronize(compile_input.device)
+
+            sd_vae_taesd_compiled_models[key] = compiled
+            elapsed = time.perf_counter() - start_time
+            print(f"TAESD compile/warmup finished: model=taew2_1.pth, elapsed={elapsed:.2f}s", flush=True)
+        except Exception:
+            sd_vae_taesd_compile_failures.add(key)
+            elapsed = time.perf_counter() - start_time
+            logger.warning(
+                f"TAESD compile/warmup failed: model=taew2_1.pth, elapsed={elapsed:.2f}s; falling back to eager",
+                exc_info=True,
+            )
+        finally:
+            del output, compiled, compile_input
+            if model_parameter.device.type == "cuda":
+                torch.cuda.empty_cache()
 
 
 def download_model(model_path: os.PathLike, model_url: str):

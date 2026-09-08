@@ -71,7 +71,9 @@ def samples_to_images_tensor(sample, approximation=None, model=None):
             approximation = 2
     elif approximation == 3:
         if (mdl := sd_vae_taesd.decoder_model()) is not None:
-            x_sample = mdl(sample.to(devices.device, devices.dtype)).detach()
+            sample = sample.to(devices.device, devices.dtype)
+            mdl = sd_vae_taesd.decoder_for_sample(mdl, sample)
+            x_sample = mdl(sample).detach()
             x_sample = x_sample * 2 - 1
         else:
             approximation = 2

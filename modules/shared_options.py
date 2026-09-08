@@ -507,6 +507,7 @@ options_templates.update(
 <li><b>TAESD</b>: high quality preview method</li>
 </ul>
                 """),
+            "live_preview_compile_taesd": OptionInfo(False, "Compile supported TAESD live previews").info("Dynamically compile and warm up the single-frame taew2_1 decoder before sampling. Supports Krea2, Qwen Image, Anima, and one-frame Wan; multi-frame video and other TAESD decoders remain eager."),
             "live_preview_fast_interrupt": OptionInfo(False, "Return image with the selected preview method on interruption").info("speed up interruption"),
             "js_live_preview_in_modal_lightbox": OptionInfo(False, "Show the live previews in full page image viewer"),
             "show_progress_every_n_steps": OptionInfo(1, "Generate live preview every N step", gr.Slider, {"minimum": -1, "maximum": 32, "step": 1}).info("-1 = only after completion of a batch"),

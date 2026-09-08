@@ -387,6 +387,11 @@ def sampling_prepare(unet: "UnetPatcher", x: torch.Tensor):
     for cnet in unet.list_controlnets():
         cnet.pre_run(real_model, percent_to_timestep_function)
 
+    # Compile outside the progress-request thread and before the first sampler step.
+    from modules import sd_vae_taesd
+
+    sd_vae_taesd.precompile_preview_decoder(x)
+
 
 def sampling_cleanup(unet: "UnetPatcher"):
     for cnet in unet.list_controlnets():

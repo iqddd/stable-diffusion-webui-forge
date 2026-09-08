@@ -18,8 +18,89 @@ from .quant_ops import (  # noqa
     QuantizedTensor,
     TensorCoreFP8Layout,
     TensorWiseINT8Layout,
+    convrot_w4a4_linear_compile_safe,
     get_layout_class,
 )
+
+INT4_CONVROT_FORMATS = frozenset(("convrot_w4a4", "int4_tensorwise"))
+INT4_QUANT_GROUP_SIZE = 64
+INT4_CONVROT_GROUP_SIZES = frozenset((16, 64, 256))
+
+
+def _quant_conf_value(layer_conf: dict, name: str, default=None):
+    params_conf = layer_conf.get("params", {})
+    if not isinstance(params_conf, dict):
+        params_conf = {}
+    return layer_conf.get(name, params_conf.get(name, default))
+
+
+def _int4_convrot_params(
+    *,
+    layer_name: str,
+    quant_format: str,
+    layer_conf: dict,
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    orig_shape: tuple[int, int],
+) -> dict:
+    out_features, in_features = orig_shape
+
+    if weight.dtype is not torch.int8:
+        raise ValueError(f"INT4 ConvRot weight for layer {layer_name} must use packed torch.int8 storage, got {weight.dtype}")
+    if in_features % 2 != 0:
+        raise ValueError(f"INT4 ConvRot input size for layer {layer_name} must be even, got {in_features}")
+
+    expected_weight_shape = (out_features, in_features // 2)
+    if weight.dim() != 2 or tuple(weight.shape) != expected_weight_shape:
+        raise ValueError(
+            f"Invalid packed INT4 ConvRot weight shape for layer {layer_name}: "
+            f"expected {expected_weight_shape}, got {tuple(weight.shape)}"
+        )
+
+    if not isinstance(scale, torch.Tensor) or scale.dtype is not torch.float32:
+        scale_dtype = getattr(scale, "dtype", type(scale).__name__)
+        raise ValueError(f"INT4 ConvRot weight scale for layer {layer_name} must be torch.float32, got {scale_dtype}")
+    if scale.numel() != out_features:
+        raise ValueError(
+            f"Invalid INT4 ConvRot weight scale for layer {layer_name}: "
+            f"expected {out_features} values, got {scale.numel()}"
+        )
+
+    # convrot_w4a4 implies rotation for compatibility with checkpoints that
+    # predate the explicit flag. int4_tensorwise must opt into it explicitly.
+    convrot = bool(_quant_conf_value(layer_conf, "convrot", quant_format == "convrot_w4a4"))
+    if not convrot:
+        raise ValueError(f"INT4 tensor-wise layer {layer_name} is unsupported without ConvRot")
+
+    convrot_groupsize = int(_quant_conf_value(layer_conf, "convrot_groupsize", 256))
+    if convrot_groupsize not in INT4_CONVROT_GROUP_SIZES:
+        raise ValueError(
+            f"Unsupported INT4 ConvRot group size for layer {layer_name}: {convrot_groupsize}; "
+            f"expected one of {sorted(INT4_CONVROT_GROUP_SIZES)}"
+        )
+    if in_features % convrot_groupsize != 0:
+        raise ValueError(
+            f"INT4 ConvRot group size {convrot_groupsize} does not divide input size "
+            f"{in_features} for layer {layer_name}"
+        )
+
+    quant_group_size = int(_quant_conf_value(layer_conf, "quant_group_size", INT4_QUANT_GROUP_SIZE))
+    if quant_group_size != INT4_QUANT_GROUP_SIZE:
+        raise ValueError(
+            f"Unsupported INT4 quantization group size for layer {layer_name}: {quant_group_size}; "
+            f"expected {INT4_QUANT_GROUP_SIZE}"
+        )
+
+    linear_dtype = _quant_conf_value(layer_conf, "linear_dtype", "int4")
+    if linear_dtype not in ("int4", "int8"):
+        raise ValueError(f"Unsupported INT4 ConvRot linear dtype for layer {layer_name}: {linear_dtype!r}")
+
+    return {
+        "scale": scale.reshape(-1).contiguous(),
+        "convrot_groupsize": convrot_groupsize,
+        "quant_group_size": quant_group_size,
+        "linear_dtype": linear_dtype,
+    }
 
 # TODO: Delete all these junks once comfy_kitchen fix AMD support...
 
@@ -85,6 +166,8 @@ def _load_quantized_module(module: torch.nn.Module, super_load, state_dict: dict
     layer_conf = state_dict.pop(f"{prefix}comfy_quant", None)
     if layer_conf is not None:
         layer_conf = json.loads(layer_conf.numpy().tobytes())
+        if not isinstance(layer_conf, dict):
+            raise ValueError(f"Invalid quantization metadata for layer {layer_name}: expected a JSON object")
 
     if layer_conf is None:
         module.weight = torch.nn.Parameter(weight.to(device=device, dtype=compute_dtype), requires_grad=False)
@@ -98,7 +181,9 @@ def _load_quantized_module(module: torch.nn.Module, super_load, state_dict: dict
         if module.quant_format is None:
             raise ValueError(f"Unknown quantization format for layer {layer_name}")
 
-        qconfig = QUANT_ALGOS[module.quant_format]
+        qconfig = QUANT_ALGOS.get(module.quant_format)
+        if qconfig is None:
+            raise ValueError(f"Unsupported quantization format {module.quant_format!r} for layer {layer_name}")
         module.layout_type = qconfig["comfy_tensor_layout"]
         layout_cls = get_layout_class(module.layout_type)
 
@@ -128,19 +213,18 @@ def _load_quantized_module(module: torch.nn.Module, super_load, state_dict: dict
             if layer_conf.get("convrot", params_conf.get("convrot", False)):
                 scales["convrot"] = True
                 scales["convrot_groupsize"] = int(layer_conf.get("convrot_groupsize", params_conf.get("convrot_groupsize", 256)))
-        elif module.quant_format == "convrot_w4a4":
+        elif module.quant_format in INT4_CONVROT_FORMATS:
             scale = pop_scale("weight_scale")
             if scale is None:
-                raise ValueError(f"Missing ConvRot W4A4 weight scale for layer {layer_name}")
-            params_conf = layer_conf.get("params", {})
-            if not isinstance(params_conf, dict):
-                params_conf = {}
-            scales = {
-                "scale": scale,
-                "convrot_groupsize": int(layer_conf.get("convrot_groupsize", params_conf.get("convrot_groupsize", 256))),
-                "quant_group_size": 64,
-                "linear_dtype": layer_conf.get("linear_dtype", params_conf.get("linear_dtype", "int4")),
-            }
+                raise ValueError(f"Missing INT4 ConvRot weight scale for layer {layer_name}")
+            scales = _int4_convrot_params(
+                layer_name=layer_name,
+                quant_format=module.quant_format,
+                layer_conf=layer_conf,
+                weight=weight,
+                scale=scale,
+                orig_shape=module._orig_shape,
+            )
         else:
             raise ValueError(f"Unsupported quantization format: {module.quant_format}")
 
@@ -149,6 +233,9 @@ def _load_quantized_module(module: torch.nn.Module, super_load, state_dict: dict
             QuantizedTensor(weight.to(device=device, dtype=qconfig["storage_t"]), module.layout_type, params),
             requires_grad=False,
         )
+        refresh_runtime_args = getattr(module, "_refresh_int4_convrot_runtime_args", None)
+        if refresh_runtime_args is not None:
+            refresh_runtime_args()
 
         if load_extra_params:
             for param_name in qconfig["parameters"]:
@@ -188,8 +275,13 @@ def _quantized_weight_state_dict(module: torch.nn.Module, sd: dict[str, torch.Te
         if module.quant_format == "int8_tensorwise" and getattr(params, "convrot", False):
             quant_conf["convrot"] = True
             quant_conf["convrot_groupsize"] = getattr(params, "convrot_groupsize", 256)
-        elif module.quant_format == "convrot_w4a4":
+        elif module.quant_format in INT4_CONVROT_FORMATS:
+            if module.quant_format == "int4_tensorwise":
+                quant_conf["convrot"] = True
             quant_conf["convrot_groupsize"] = getattr(params, "convrot_groupsize", 256)
+            quant_group_size = getattr(params, "quant_group_size", INT4_QUANT_GROUP_SIZE)
+            if quant_group_size != INT4_QUANT_GROUP_SIZE:
+                quant_conf["quant_group_size"] = quant_group_size
             linear_dtype = getattr(params, "linear_dtype", "int4")
             if linear_dtype != "int4":
                 quant_conf["linear_dtype"] = linear_dtype
@@ -214,6 +306,13 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
         class Linear(torch.nn.Module, ForgeWeights):
             _disabled_formats = disabled
 
+            def __setattr__(self, name, value):
+                super().__setattr__(name, value)
+                # Catch patcher replacement/restoration of the Parameter.  The
+                # runtime aliases contain no additional tensor storage.
+                if name == "weight" and "_parameters" in self.__dict__:
+                    self._refresh_int4_convrot_runtime_args()
+
             def __init__(self, in_features: int, out_features: int, bias: bool = True, device=None, dtype=None):
                 super().__init__()
 
@@ -233,6 +332,19 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
             def reset_parameters(self):
                 return None
 
+            def _refresh_int4_convrot_runtime_args(self):
+                weight = self.__dict__.get("_parameters", {}).get("weight")
+                if isinstance(weight, QuantizedTensor) and getattr(self, "quant_format", None) in INT4_CONVROT_FORMATS:
+                    params = weight._params
+                    self._int4_convrot_qweight = weight._qdata
+                    self._int4_convrot_scale = params.scale
+                    self._int4_convrot_groupsize = params.convrot_groupsize
+                    self._int4_quant_group_size = params.quant_group_size
+                    self._int4_linear_dtype = params.linear_dtype
+                else:
+                    self._int4_convrot_qweight = None
+                    self._int4_convrot_scale = None
+
             def _load_from_state_dict(self, *args):
                 _load_quantized_module(self, super()._load_from_state_dict, *args, load_extra_params=True)
 
@@ -244,6 +356,9 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 input_shape = input.shape
                 reshaped_nd = False
 
+                # TODO: Add a factorized online LoRA path for INT4 ConvRot.
+                # Until then weight functions deliberately use Forge's correct,
+                # but slower, dequantized fallback below.
                 _use_quantized = getattr(self, "layout_type", None) is not None and not isinstance(input, QuantizedTensor) and not self._full_precision_mm and not getattr(self, "forge_force_cast_weights", False) and len(self.weight_function) == 0 and len(self.bias_function) == 0
                 quantize_input = QUANT_ALGOS.get(getattr(self, "quant_format", None), {}).get("quantize_input", True)
 
@@ -295,14 +410,36 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 else:
                     weight_only_quant = _use_quantized and not quantize_input and isinstance(self.weight, QuantizedTensor)
 
-                    if weight_only_quant:
+                    int4_convrot_fast_path = weight_only_quant and getattr(self, "quant_format", None) in INT4_CONVROT_FORMATS
+
+                    if int4_convrot_fast_path:
+                        # Plain tensor aliases keep comfy-kitchen's Params
+                        # dataclass and QuantizedTensor subclass out of the
+                        # Dynamo graph. In low-VRAM mode copy the two actual
+                        # kernel operands directly on the current stream.
+                        weight = cast_to_device(self._int4_convrot_qweight, input.device, torch.int8)
+                        scale = cast_to_device(self._int4_convrot_scale, input.device, torch.float32)
+                        bias = None if self.bias is None else cast_to_device(self.bias, input.device, input.dtype)
+                        signal = None
+                    elif weight_only_quant:
                         weight, bias, signal = weights_manual_cast(self, x=None, dtype=self.weight.dtype, device=input.device, bias_dtype=input.dtype)
                         weight = weight.to(dtype=input.dtype)
                     else:
                         weight, bias, signal = weights_manual_cast(self, x=input)
 
                     with main_stream_worker(weight, bias, signal):
-                        output = torch.nn.functional.linear(input, weight, bias)
+                        if int4_convrot_fast_path:
+                            output = convrot_w4a4_linear_compile_safe(
+                                input,
+                                weight,
+                                scale,
+                                bias,
+                                self._int4_convrot_groupsize,
+                                self._int4_quant_group_size,
+                                self._int4_linear_dtype,
+                            )
+                        else:
+                            output = torch.nn.functional.linear(input, weight, bias)
 
                 if reshaped_nd:
                     output = output.reshape((*input_shape[:-1], self.weight.shape[0]))
@@ -327,7 +464,9 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 self.weight = torch.nn.Parameter(weight, requires_grad=False)
 
             def _apply(self, fn, recurse=True):
-                return _quantized_apply(self, fn, recurse)
+                result = _quantized_apply(self, fn, recurse)
+                self._refresh_int4_convrot_runtime_args()
+                return result
 
         class Embedding(ForgeOperations.Embedding):
             def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):

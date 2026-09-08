@@ -103,6 +103,11 @@ parser.add_argument("--disable-mmap", action="store_true", help="Don't use mmap 
 parser.add_argument("--tiled-conv2d", type=int, default=0, metavar="TILE_SIZE", choices=[0, 64, 128, 256, 512], help="reduce VAE memory usage ; increase processing time")
 parser.add_argument("--enable-triton-backend", action="store_true", help="Enable the use of Triton backend in comfy-kitchen")
 parser.add_argument("--disable-int8-override", action="store_true", help="Disable the use of overridden int8 implementation")
+parser.add_argument(
+    "--int4-convrot-compile-precision",
+    action="store_true",
+    help="Preserve eager precision around compiled INT4 ConvRot operators (enables Inductor force_same_precision and emulate_precision_casts)",
+)
 
 
 class SageAttentionFuncs(enum.Enum):

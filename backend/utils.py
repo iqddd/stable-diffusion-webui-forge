@@ -66,12 +66,13 @@ def load_torch_file(ckpt: str, *, safe_load=True, device=None, return_metadata=F
 
     if ckpt.lower().endswith((".safetensors", ".sft")):
         try:
-            with safetensors.safe_open(ckpt, framework="pt", device=device.type) as f:
+            # Windows copy-on-write mappings charge commit for the entire file.
+            # Independent pread buffers can be freed as each weight is moved.
+            open_kwargs = {"backend": "pread"} if os.name == "nt" or DISABLE_MMAP else {}
+            with safetensors.safe_open(ckpt, framework="pt", device=str(device), **open_kwargs) as f:
                 sd = {}
                 for k in f.keys():
                     tensor = f.get_tensor(k)
-                    if DISABLE_MMAP:
-                        tensor = tensor.to(device=device, copy=True)
                     sd[k] = tensor
                 if return_metadata:
                     metadata = f.metadata()
