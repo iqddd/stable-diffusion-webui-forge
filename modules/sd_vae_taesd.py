@@ -23,6 +23,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from backend.logging import setup_logger
 from backend.state_dict import load_state_dict
 from backend.utils import load_torch_file
 from modules import devices, paths_internal, shared
@@ -35,6 +36,7 @@ sd_vae_taesd_compile_failures: set[tuple[int, str, torch.dtype]] = set()
 sd_vae_taesd_compile_lock = threading.Lock()
 
 logger = logging.getLogger(__name__)
+setup_logger(logger)
 
 TWorkItem = namedtuple("TWorkItem", ("input_tensor", "block_index"))
 
@@ -317,11 +319,11 @@ def precompile_preview_decoder(sample: torch.Tensor) -> None:
         model_parameter = next(model.parameters())
         compile_input = sample.detach().to(device=model_parameter.device, dtype=model_parameter.dtype)
         start_time = time.perf_counter()
-        print(
+        logger.info("TAESD compile started")
+        logger.debug(
             "TAESD compile/warmup started: "
             f"model=taew2_1.pth, input_shape={tuple(compile_input.shape)}, "
-            f"dtype={compile_input.dtype}, dynamic=True",
-            flush=True,
+            f"dtype={compile_input.dtype}, dynamic=True"
         )
 
         compiled = None
@@ -353,7 +355,8 @@ def precompile_preview_decoder(sample: torch.Tensor) -> None:
 
             sd_vae_taesd_compiled_models[key] = compiled
             elapsed = time.perf_counter() - start_time
-            print(f"TAESD compile/warmup finished: model=taew2_1.pth, elapsed={elapsed:.2f}s", flush=True)
+            logger.info("TAESD compile finished")
+            logger.debug(f"TAESD compile/warmup finished: model=taew2_1.pth, elapsed={elapsed:.2f}s")
         except Exception:
             sd_vae_taesd_compile_failures.add(key)
             elapsed = time.perf_counter() - start_time
