@@ -178,7 +178,7 @@ class State:
                 else:
                     self.assign_current_image(modules.sd_samplers.sample_to_image(self.current_latent))
 
-            self.current_image_sampling_step = self.sampling_step
+            self.current_image_sampling_step = self.preview_step
 
         except Exception:
             errors.record_exception()
