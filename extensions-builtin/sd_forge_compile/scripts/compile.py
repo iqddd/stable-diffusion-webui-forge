@@ -26,6 +26,7 @@ else:
 
 _COMPILE_CONFIG_KEY = "_torch_compile_config"
 _COMPILE_WRAPPER_KEY = "_torch_compile_wrapper"
+_DYNAMIC_SPATIAL_MODEL_KEY = "_forge_dynamic_spatial_model"
 _ORIG_APPLY_KEY = "_orig_apply_model"
 _GRAPH_BREAK_ENV = "FORGE_TORCH_COMPILE_DEBUG_GRAPH_BREAKS"
 _GRAPH_BREAK_LOG_ENV = "FORGE_TORCH_COMPILE_DEBUG_LOG"
@@ -39,6 +40,22 @@ _GRAPH_BREAK_VERBOSE_LOGGERS = (
 
 logger = logging.getLogger("compile")
 setup_logger(logger)
+
+
+class _DynamicSpatialModel(torch.nn.Module):
+    """Mark only denoiser H/W dynamic before entering the compiled module."""
+
+    def __init__(self, compiled_model: torch.nn.Module):
+        super().__init__()
+        self.compiled_model = compiled_model
+
+    def forward(self, *args, **kwargs):
+        x = args[0] if args else kwargs.get("x")
+        if isinstance(x, torch.Tensor) and x.ndim in (4, 5):
+            # Weak marking keeps model-derived constraints while preventing a
+            # square first input from duck-specializing H and W as equal.
+            torch._dynamo.maybe_mark_dynamic(x, [x.ndim - 2, x.ndim - 1])
+        return self.compiled_model(*args, **kwargs)
 
 
 def skip_torch_compile_dict(guard_entries):
@@ -211,9 +228,15 @@ class TorchCompileForForge(scripts.Script):
 
             if not hasattr(kmodel, "_forge_compiled_model"):
                 setattr(kmodel, "_forge_compiled_model", torch.compile(orig_model, **compile_config))
+                if compile_config.get("dynamic"):
+                    setattr(kmodel, _DYNAMIC_SPATIAL_MODEL_KEY, _DynamicSpatialModel(kmodel._forge_compiled_model))
 
             compiled = getattr(kmodel, "_forge_compiled_model")
-            set_attr_raw(kmodel, "diffusion_model", compiled)
+            if compile_config.get("dynamic"):
+                target = getattr(kmodel, _DYNAMIC_SPATIAL_MODEL_KEY)
+            else:
+                target = compiled
+            set_attr_raw(kmodel, "diffusion_model", target)
 
             try:
                 return original_apply_model(*args, **kwargs)
@@ -225,6 +248,9 @@ class TorchCompileForForge(scripts.Script):
 
     @staticmethod
     def _remove_compile_wrapper(kmodel: "KModel"):
+        if hasattr(kmodel, _DYNAMIC_SPATIAL_MODEL_KEY):
+            delattr(kmodel, _DYNAMIC_SPATIAL_MODEL_KEY)
+
         if hasattr(kmodel, "_forge_compiled_model"):
             delattr(kmodel, "_forge_compiled_model")
 

@@ -27,7 +27,7 @@ from backend import args, memory_management
 from backend.logging import setup_logger
 from backend.modules.k_prediction import rescale_zero_terminal_snr_sigmas
 from backend.utils import hash_tensor
-from modules import devices, errors, extra_networks, images, infotext_utils, masking, profiling, prompt_parser, rng, scripts, sd_samplers, sd_samplers_common, sd_unet, sd_vae_approx
+from modules import conditioning_precompute, devices, errors, extra_networks, images, infotext_utils, masking, profiling, prompt_parser, rng, scripts, sd_samplers, sd_samplers_common, sd_unet, sd_vae_approx
 from modules.sd_models import apply_token_merging, forge_model_reload
 from modules.sd_samplers_common import approximation_indexes, decode_first_stage, images_tensor_to_samples
 from modules.shared import cmd_opts, opts, state
@@ -442,6 +442,11 @@ class StableDiffusionProcessing:
 
         caches is a list with items described above.
         """
+
+        kind = "positive" if function is prompt_parser.get_multicond_learned_conditioning else "negative"
+        precomputed = conditioning_precompute.lookup(self, required_prompts, steps, extra_network_data, hires_steps, kind)
+        if precomputed is not None:
+            return precomputed
 
         cached_params = self.cached_params(required_prompts, steps, extra_network_data, hires_steps)
 
@@ -974,6 +979,12 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
             if p.scripts is not None:
                 p.scripts.process_batch(p, batch_number=n, prompts=p.prompts, seeds=p.seeds, subseeds=p.subseeds)
 
+            # Prompts from File may prepare the request-local CPU conditioning
+            # cache here. This is after all normal per-batch text hooks and
+            # immediately before Forge commits to setup_conds().
+            conditioning_precompute.maybe_precompute(p)
+            if state.interrupted or state.stopping_generation:
+                break
             p.setup_conds()
 
             p.extra_generation_params.update(p.sd_model.extra_generation_params)

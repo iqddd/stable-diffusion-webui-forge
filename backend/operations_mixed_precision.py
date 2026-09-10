@@ -316,6 +316,11 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
             def __init__(self, in_features: int, out_features: int, bias: bool = True, device=None, dtype=None):
                 super().__init__()
 
+                # Own the flag before compilation: offload/reload assigns it on
+                # the instance, which would otherwise invalidate Dynamo's guard
+                # for an inherited attribute even after restoring False.
+                self.parameters_manual_cast = False
+
                 self.factory_kwargs = {"device": device, "dtype": MixedPrecisionOps._compute_dtype}
 
                 self.in_features = in_features

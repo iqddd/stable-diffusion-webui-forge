@@ -1,9 +1,10 @@
 import copy
 import shlex
+from dataclasses import dataclass
 
 import gradio as gr
 import modules.scripts as scripts
-from modules import errors, sd_models, sd_samplers
+from modules import conditioning_precompute, errors, sd_models, sd_samplers
 from modules.processing import Processed, fix_seed, process_images
 from modules.shared import state
 
@@ -56,6 +57,19 @@ prompt_tags = {
     "do_not_save_samples": process_boolean_tag,
     "do_not_save_grid": process_boolean_tag,
 }
+
+
+precompute_prompt_tags = {"prompt", "negative_prompt", "seed", "subseed", "batch_size", "n_iter"}
+
+
+@dataclass
+class PromptJob:
+    p: object
+    prompt: str
+    negative_prompt: str
+    line_prompt: str
+    line_negative_prompt: str
+    unsupported_args: set[str]
 
 
 def cmdargs(line):
@@ -115,13 +129,14 @@ class PromptsFromTexts(scripts.Script):
 
         prompt_txt = gr.Textbox(label="List of prompt inputs", lines=2, elem_id=self.elem_id("prompt_txt"))
         file = gr.File(label="Upload prompt inputs", type="binary", elem_id=self.elem_id("file"))
+        precompute_prompts = gr.Checkbox(value=False, label="Precompute prompts", elem_id=self.elem_id("precompute_prompts"))
 
         prompt_txt.change(lambda tb: gr.update(lines=7) if ("\n" in tb) else gr.update(lines=2), inputs=[prompt_txt], outputs=[prompt_txt], show_progress=False)
         file.change(fn=load_prompt_file, inputs=[file], outputs=[file, prompt_txt], show_progress=False)
 
-        return [checkbox_iterate, checkbox_iterate_batch, prompt_position, prompt_txt]
+        return [checkbox_iterate, checkbox_iterate_batch, prompt_position, prompt_txt, precompute_prompts]
 
-    def run(self, p, checkbox_iterate: bool, checkbox_iterate_batch: bool, prompt_position: str, prompt_txt: str):
+    def run(self, p, checkbox_iterate: bool, checkbox_iterate_batch: bool, prompt_position: str, prompt_txt: str, precompute_prompts: bool = False):
         lines = [x for x in (x.strip() for x in prompt_txt.splitlines()) if x]
 
         p.do_not_save_grid = True
@@ -149,13 +164,28 @@ class PromptsFromTexts(scripts.Script):
 
         state.job_count = job_count
 
-        images = []
-        all_prompts = []
-        infotexts = []
+        # Construct every processing object before the first call. The ordinary
+        # path still invokes process_images one object at a time; the optional
+        # precompute context can therefore prepare all text conditioning at the
+        # first real commit point without duplicating the processing pipeline.
+        job_objects = []
+        next_seed = p.seed
         for args in jobs:
-            state.job = f"{state.job_no + 1} out of {state.job_count}"
-
             copy_p = copy.copy(p)
+            copy_p.cached_c = [None, None, None]
+            copy_p.cached_uc = [None, None, None]
+            copy_p.override_settings = p.override_settings.copy()
+            copy_p.styles = p.styles.copy()
+            # A shallow processing copy is intentional: models and ScriptRunner
+            # remain shared, but each file line owns all data mutated by the
+            # normal generation/postprocessing pipeline.
+            copy_p.extra_generation_params = p.extra_generation_params.copy()
+            copy_p.comments = {}
+            copy_p.extra_result_images = []
+            copy_p.latents_after_sampling = []
+            copy_p.pixels_after_sampling = []
+            copy_p.color_corrections = None
+            copy_p.seed = next_seed
             for k, v in args.items():
                 if k == "sd_model":
                     copy_p.override_settings["sd_model_checkpoint"] = v
@@ -174,13 +204,47 @@ class PromptsFromTexts(scripts.Script):
                 else:
                     copy_p.negative_prompt = f'{p.negative_prompt} {args.get("negative_prompt")}'
 
-            proc = process_images(copy_p)
-            images += proc.images
+            job_objects.append(
+                PromptJob(
+                    p=copy_p,
+                    prompt=copy_p.prompt,
+                    negative_prompt=copy_p.negative_prompt,
+                    line_prompt=args.get("prompt", ""),
+                    line_negative_prompt=args.get("negative_prompt", ""),
+                    unsupported_args=set(args) - precompute_prompt_tags,
+                )
+            )
 
             if checkbox_iterate:
-                p.seed = p.seed + (p.batch_size * p.n_iter)
+                next_seed = next_seed + (p.batch_size * p.n_iter)
 
-            all_prompts += proc.all_prompts
-            infotexts += proc.infotexts
+        context = None
+        if precompute_prompts:
+            reason = conditioning_precompute.compatibility_reason(p, job_objects)
+            if reason:
+                print(f"[Prompts from File] Precompute prompts unavailable: {reason}. Continuing with normal text encoding.")
+                conditioning_precompute.log_initial_fallback(reason)
+            else:
+                context = conditioning_precompute.PrecomputeContext(job_objects, common_prompt=p.prompt)
+                for job in job_objects:
+                    job.p._precompute_context = context
+
+        images = []
+        all_prompts = []
+        infotexts = []
+        try:
+            for job in job_objects:
+                state.job = f"{state.job_no + 1} out of {state.job_count}"
+                proc = process_images(job.p)
+                images += proc.images
+
+                if checkbox_iterate:
+                    p.seed = p.seed + (p.batch_size * p.n_iter)
+
+                all_prompts += proc.all_prompts
+                infotexts += proc.infotexts
+        finally:
+            if context is not None:
+                context.clear()
 
         return Processed(p, images, p.seed, "", all_prompts=all_prompts, infotexts=infotexts)
