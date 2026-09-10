@@ -5,6 +5,13 @@ import triton
 import triton.language as tl
 from triton.language.extra import libdevice
 
+
+def _int8_autotune_m_bucket(m):
+    # Keep short sequences exact; nearby larger sequences share a tuning result.
+    # Only the autotune key is rounded: kernels still receive the real M.
+    return m if m < 64 else triton.cdiv(m, 64) * 64
+
+
 # =============================================================================
 # Kernel 1: Fused Row-wise Quantization (FP16/BF16 -> INT8 + Scale)
 # =============================================================================
@@ -92,7 +99,8 @@ def triton_quantize_rowwise(x: torch.Tensor):
         triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32, "GROUP_SIZE_M": 8}, num_stages=4, num_warps=4),
         triton.Config({"BLOCK_M": 128, "BLOCK_N": 32, "BLOCK_K": 32, "GROUP_SIZE_M": 8}, num_stages=4, num_warps=4),
     ],
-    key=["M", "N", "K"],
+    key=["M_BUCKET", "N", "K", "HAS_BIAS"],
+    cache_results=True,
 )
 @triton.jit
 def _int8_matmul_dequant_kernel(
@@ -107,6 +115,7 @@ def _int8_matmul_dequant_kernel(
     M,
     N,
     K,
+    M_BUCKET,
     # Strides
     stride_am,
     stride_ak,
@@ -244,6 +253,7 @@ def triton_int8_linear(x: torch.Tensor, weight: torch.Tensor, weight_scale, bias
         M=M,
         N=N,
         K=K,
+        M_BUCKET=_int8_autotune_m_bucket(M),
         # Strides
         stride_am=x_int8.stride(0),
         stride_ak=x_int8.stride(1),
@@ -273,7 +283,8 @@ def triton_int8_linear(x: torch.Tensor, weight: torch.Tensor, weight_scale, bias
         triton.Config({"BLOCK_M": 64, "BLOCK_N": 128, "BLOCK_K": 32, "GROUP_SIZE_M": 8}, num_stages=4, num_warps=4),
         triton.Config({"BLOCK_M": 128, "BLOCK_N": 32, "BLOCK_K": 32, "GROUP_SIZE_M": 8}, num_stages=4, num_warps=4),
     ],
-    key=["M", "N", "K"],
+    key=["M_BUCKET", "N", "K", "HAS_BIAS"],
+    cache_results=True,
 )
 @triton.jit
 def _int8_matmul_dequant_per_row_kernel(
@@ -288,6 +299,7 @@ def _int8_matmul_dequant_per_row_kernel(
     M,
     N,
     K,
+    M_BUCKET,
     # Strides
     stride_am,
     stride_ak,
@@ -392,7 +404,7 @@ def triton_int8_linear_per_row(x: torch.Tensor, weight: torch.Tensor, weight_sca
     has_bias = bias is not None
     bias_ptr = bias if has_bias else x  # Dummy pointer if None
 
-    _int8_matmul_dequant_per_row_kernel[grid](a_ptr=x_int8, b_ptr=weight, c_ptr=output, a_scale_ptr=x_scale, b_scale_ptr=ws, bias_ptr=bias_ptr, M=M, N=N, K=K, stride_am=x_int8.stride(0), stride_ak=x_int8.stride(1), stride_bk=weight.stride(1), stride_bn=weight.stride(0), stride_cm=output.stride(0), stride_cn=output.stride(1), HAS_BIAS=has_bias)
+    _int8_matmul_dequant_per_row_kernel[grid](a_ptr=x_int8, b_ptr=weight, c_ptr=output, a_scale_ptr=x_scale, b_scale_ptr=ws, bias_ptr=bias_ptr, M=M, N=N, K=K, M_BUCKET=_int8_autotune_m_bucket(M), stride_am=x_int8.stride(0), stride_ak=x_int8.stride(1), stride_bk=weight.stride(1), stride_bn=weight.stride(0), stride_cm=output.stride(0), stride_cn=output.stride(1), HAS_BIAS=has_bias)
 
     # 6. Reshape output
     return output.reshape(x_shape_orig[:-1] + (N,))

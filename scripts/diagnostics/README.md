@@ -1,5 +1,42 @@
 # Weight lifetime and offline LoRA regression checks
 
+## Krea INT8 autotune disk cache
+
+Forge's two Triton INT8 GEMMs cache tuning results on disk, keyed by 64-row
+buckets (exact M below 64), N, K, bias presence and argument dtypes. Real M is
+unchanged; there is no padding. Triton also includes its version/backend target,
+kernel source, relevant environment and candidate configs in the disk cache key.
+
+Prewarm the main DiT INT8 shapes found in the current mixed Krea checkpoint:
+
+```powershell
+.\venv\Scripts\python.exe scripts/diagnostics/warmup_krea_int8.py
+.\venv\Scripts\python.exe scripts/diagnostics/warmup_krea_int8.py --verify-cache-only
+```
+
+Defaults: BF16, batch=1 text-to-image, image width and height each 960..1216
+(multiples of 16), 0..512 prompt tokens plus 5 remaining template positions.
+This covers all combined row counts 3605..6293, 43 buckets and four unique INT8
+shapes in `krea2_turbo_int4_tensorwise_mixed.safetensors` (172 combinations).
+Prompt tokens mean the complete active prompt after schedule selection, not
+only the inserted fragment; characters are not a token limit. Additional
+emphasis/template segments, references, larger batches/CFG batching or different
+dtypes can require additional entries. INT4 and attention are not prewarmed.
+
+The script uses synthetic data and reads only checkpoint metadata/shapes. It
+needs no TE, model load, API or Gradio. The first command resumes through existing
+disk entries; the second uses a different M within each bucket in a fresh process
+and raises if any autotune benchmark is attempted. It can still compile a new JIT
+specialization: successful verification proves absence of autotuning, not zero
+startup latency. Tuning near the bucket centre is a heuristic, not a guarantee
+that every M in a bucket receives its individually fastest configuration.
+
+The script prints the effective Triton cache directory. Run it with the same
+venv, GPU and cache environment as the server. Rewarm after cache-invalidating
+kernel/Triton changes. Out-of-range inputs remain supported and tune on demand.
+
+## Weight lifetime checks
+
 The production fix uses safetensors `pread` on Windows (and with
 `--disable-mmap`) and retains parameter names, rather than Parameter objects,
 in ModelPatcher loading/unloading lists. LoRA backups and merge order are
