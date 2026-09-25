@@ -96,7 +96,9 @@ class State:
 
     def nextjob(self):
         if shared.opts.live_previews_enable and shared.opts.show_progress_every_n_steps == -1:
-            self.do_set_current_image()
+            current_is_video = self.current_latent is not None and self.current_latent.ndim == 5 and self.current_latent.size(2) > 1
+            if not self.completed_output_preview_enabled(is_video=current_is_video):
+                self.do_set_current_image()
 
         self.job_no += 1
         self.sampling_step = 0
@@ -185,7 +187,33 @@ class State:
 
     @torch.inference_mode()
     def assign_current_image(self, image: Image.Image):
+        saved_as = getattr(image, "already_saved_as", None)
         if shared.opts.live_previews_image_format == "jpeg" and not getattr(image, "is_animated", False) and image.mode != "RGB":
             image = image.convert("RGB")
+            if saved_as:
+                image.already_saved_as = saved_as
+
         self.current_image = image
         self.id_live_preview += 1
+
+    def completed_output_preview_enabled(self, is_video: bool = False) -> bool:
+        return (
+            shared.opts.live_previews_enable
+            and shared.opts.show_progress_every_n_steps == -1
+            and getattr(shared.opts, "live_preview_use_completed_output", False)
+            and not is_video
+        )
+
+    def assign_completed_images(self, completed_images: list[Image.Image], is_video: bool = False):
+        if not completed_images or not self.completed_output_preview_enabled(is_video=is_video):
+            return
+
+        # Склеиваем сетку ТОЛЬКО если картинок в батче действительно больше одной.
+        # Для одиночной картинки сохраняем оригинальный объект со ссылкой already_saved_as.
+        if shared.opts.show_progress_grid and len(completed_images) > 1:
+            from modules import images
+            image = images.image_grid(completed_images)
+        else:
+            image = completed_images[0]
+
+        self.assign_current_image(image)

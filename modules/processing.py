@@ -928,7 +928,7 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
             p.init(p.all_prompts, p.all_seeds, p.all_subseeds)
 
             # for OSX, loading the model during sampling changes the generated picture, so it is loaded here
-            if shared.opts.live_previews_enable and opts.show_progress_type == "Approx NN":
+            if shared.opts.live_previews_enable and opts.show_progress_type == "Approx NN" and not state.completed_output_preview_enabled(is_video=_is_video):
                 sd_vae_approx.model()
 
             sd_unet.apply_unet()
@@ -1056,6 +1056,7 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
             if _is_video:
                 frames = []
 
+            completed_batch_images = []
             for i, x_sample in enumerate(x_samples_ddim):
                 p.batch_index = i
                 x_sample = 255.0 * np.moveaxis(x_sample.cpu().numpy(), 0, 2)
@@ -1112,6 +1113,8 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                     p.scripts.postprocess_image_after_composite(p, pp)
                     image = pp.image
 
+                completed_batch_images.append(image)
+
                 if save_samples:
                     images.save_image(image, p.outpath_samples, "", p.seeds[i], p.prompts[i], opts.samples_format, info=infotext(i), p=p)
 
@@ -1139,6 +1142,12 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
             if _is_video:
                 video_path = images.save_video(p, frames, info=infotext(use_main_prompt=True))
                 del frames
+
+            # With batch-only previews, publish the image objects that have
+            # already passed the normal decoder and all image postprocessing.
+            # On interruption these objects already reflect the existing
+            # live_preview_fast_interrupt choice made by decode_first_stage().
+            state.assign_completed_images(completed_batch_images, is_video=_is_video)
 
             del x_samples_ddim
 

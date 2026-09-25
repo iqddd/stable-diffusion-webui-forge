@@ -23,6 +23,7 @@ __pycache__
 /repositories
 /styles.csv
 /styles.csv.bak
+/start.bat
 /sysinfo*.json
 /tmp
 /ui-config.json

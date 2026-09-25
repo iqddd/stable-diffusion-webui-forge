@@ -5,6 +5,8 @@ import io
 import random
 import string
 import time
+import os
+import urllib.parse
 from collections import OrderedDict
 from typing import List
 
@@ -125,26 +127,38 @@ def progressapi(req: ProgressRequest):
         if shared.state.id_live_preview != req.id_live_preview:
             image = shared.state.current_image
             if image is not None:
-                _video: bool = getattr(image, "is_animated", False)
-                _format = "gif" if _video else opts.live_previews_image_format
-                buffered = io.BytesIO()
-
-                if _format == "png":
-                    # using optimize for large images takes an enormous amount of time
-                    if max(*image.size) <= 256:
-                        save_kwargs = {"optimize": True}
-                    else:
-                        save_kwargs = {"optimize": False, "compress_level": 1}
-                elif _format == "gif":
-                    save_kwargs = {"save_all": True, "loop": 0}
+                # 1. Если файл уже сохранен на диске (наш целевой AVIF/PNG) — отдаем путь напрямую
+                saved_path = getattr(image, "already_saved_as", None)
+                if saved_path and os.path.isfile(saved_path):
+                    normalized_path = os.path.abspath(saved_path).replace("\\", "/")
+                    url_path = urllib.parse.quote(normalized_path, safe="/:")
+                    live_preview = f"/file={url_path}"
+                    id_live_preview = shared.state.id_live_preview
                 else:
-                    image = image.convert("RGB")
-                    save_kwargs = {}
+                    # 2. Иначе fallback в base64 (для промежуточных шагов сэмплера)
+                    _video: bool = getattr(image, "is_animated", False)
+                    _format = "gif" if _video else opts.live_previews_image_format
+                    buffered = io.BytesIO()
 
-                image.save(buffered, format=_format, **save_kwargs)
-                base64_image = base64.b64encode(buffered.getvalue()).decode("ascii")
-                live_preview = f"data:image/{_format};base64,{base64_image}"
-                id_live_preview = shared.state.id_live_preview
+                    if _format == "png":
+                        if max(*image.size) <= 256:
+                            save_kwargs = {"optimize": True}
+                        else:
+                            save_kwargs = {"optimize": False, "compress_level": 1}
+                    elif _format == "gif":
+                        save_kwargs = {"save_all": True, "loop": 0}
+                    elif _format == "webp":
+                        save_kwargs = {"quality": 95}
+                    elif _format in ("jpg", "jpeg"):
+                        save_kwargs = {"quality": 95}
+                    else:
+                        image = image.convert("RGB")
+                        save_kwargs = {}
+
+                    image.save(buffered, format=_format, **save_kwargs)
+                    base64_image = base64.b64encode(buffered.getvalue()).decode("ascii")
+                    live_preview = f"data:image/{_format};base64,{base64_image}"
+                    id_live_preview = shared.state.id_live_preview
 
     return ProgressResponse(active=active, queued=queued, completed=completed, progress=progress, eta=eta, live_preview=live_preview, id_live_preview=id_live_preview, textinfo=shared.state.textinfo)
 
