@@ -138,6 +138,17 @@ class TextFusionTransformer(nn.Module):
         self.layerwise_blocks = nn.ModuleList([TextFusionBlock(txt_dim, heads, multiplier, bias, kvheads) for _ in range(2)])
         self.projector = nn.Linear(num_txt_layers, 1, bias=False)
         self.refiner_blocks = nn.ModuleList([TextFusionBlock(txt_dim, heads, multiplier, bias, kvheads) for _ in range(2)])
+        # The single diff tensor in krea2filterbypass3.safetensors. Keep it
+        # separate from the projector weight so it also works with quantized
+        # projectors and does not require reapplying a LoRA when strength changes.
+        self.register_buffer("filter_bypass_delta", torch.tensor([[0.0] * 8 + [-0.51171875, -0.890625, -0.609375, 0.0]]), persistent=False)
+        self.register_buffer("filter_bypass_strength", torch.zeros(()), persistent=False)
+
+    @torch.inference_mode()
+    def set_filter_bypass_strength(self, strength: float):
+        # forge_loader creates this buffer in inference_mode; updates must
+        # use that context too, including calls made before sampling starts.
+        self.filter_bypass_strength.fill_(max(0.0, min(3.0, float(strength))))
 
     def forward(self, x, mask=None, transformer_options={}):
         b, l, n, d = x.shape
@@ -145,7 +156,8 @@ class TextFusionTransformer(nn.Module):
         for block in self.layerwise_blocks:
             x = block(x.contiguous(), mask=None, transformer_options=transformer_options)
         x = rearrange(x, "(b l) n d -> b l d n", b=b, l=l)
-        x = self.projector(x).squeeze(-1)
+        bypass_weight = (self.filter_bypass_delta * self.filter_bypass_strength).to(x)
+        x = (self.projector(x) + F.linear(x, bypass_weight)).squeeze(-1)
         for block in self.refiner_blocks:
             x = block(x, mask=mask, transformer_options=transformer_options)
         return x

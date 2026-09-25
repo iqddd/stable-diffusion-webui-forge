@@ -24,6 +24,7 @@ import modules.sd_models as sd_models
 import modules.sd_vae as sd_vae
 import modules.shared as shared
 from backend import args, memory_management
+from backend.diffusion_engine.krea import configure_filter_bypass
 from backend.logging import setup_logger
 from backend.modules.k_prediction import rescale_zero_terminal_snr_sigmas
 from backend.utils import hash_tensor
@@ -841,6 +842,9 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
 
         # backwards compatibility, fix sampler and scheduler if invalid
         sd_samplers.fix_p_invalid_sampler_and_scheduler(p)
+
+        # Snapshot this global setting once per process_images call, outside the compiled model.
+        configure_filter_bypass(p.sd_model, opts.krea2_filter_bypass_strength)
 
         with profiling.Profiler():
             res = process_images_inner(p)

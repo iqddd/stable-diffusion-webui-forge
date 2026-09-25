@@ -255,6 +255,7 @@ options_templates.update(
             "anima_do_reference": OptionInfo(False, "[Anima] Enable Reference").info("enable Edit ; disable img2img").info("pin to <b>Quicksettings</b> is recommended if changed often").info("requires specfic Edit LoRA"),
             "krea2_do_reference": OptionInfo(False, "[Krea2] Enable Reference").info("enable Edit ; disable img2img").info("pin to <b>Quicksettings</b> is recommended if changed often").info("requires specfic Edit LoRA"),
             "reference_explanation": OptionHTML("<b>Note:</b> Remember to change the setting before txt2img to clear the reference"),
+            "krea2_filter_bypass_strength": OptionInfo(0.0, "[Krea2] Filter Bypass Strength", gr.Slider, {"minimum": 0.0, "maximum": 3.0, "step": 0.05}).info("0 disables the effect; can be added to Quicksettings. Applies only to Krea 2 models."),
         },
     )
 )

@@ -42,6 +42,10 @@ class Krea2(ForgeDiffusionEngine):
 
         self.is_wan = True
 
+    def set_filter_bypass_strength(self, strength: float):
+        self.forge_objects.unet.model.diffusion_model.txtfusion.set_filter_bypass_strength(strength)
+
+
     @torch.inference_mode()
     def get_learned_conditioning(self, prompt: "SdConditioning"):
         memory_management.load_model_gpu(self.forge_objects.clip.patcher)
@@ -108,3 +112,8 @@ class Krea2(ForgeDiffusionEngine):
                 self.ini_latent = start_image.cpu()
 
         return super().encode_first_stage(x)
+
+
+def configure_filter_bypass(sd_model, strength: float):
+    if isinstance(sd_model, Krea2):
+        sd_model.set_filter_bypass_strength(strength)
