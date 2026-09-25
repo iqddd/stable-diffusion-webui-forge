@@ -207,6 +207,9 @@ def create_ui():
 
         dummy_component = gr.Textbox(visible=False)
         dummy_component_number = gr.Number(visible=False)
+        # Keep the request payload outside ResizeHandleRow so it cannot affect its columns.
+        txt2img_filter_bypass_strength = gr.Number(value=opts.krea2_filter_bypass_strength, visible=False)
+        no_config(txt2img_filter_bypass_strength)
 
         extra_tabs = gr.Tabs(elem_id="txt2img_extra_tabs", elem_classes=["extra-networks"])
         extra_tabs.__enter__()
@@ -337,8 +340,6 @@ def create_ui():
                 )
 
             output_panel = create_output_panel("txt2img", opts.outdir_txt2img_samples, toprow)
-            txt2img_filter_bypass_strength = gr.Number(value=opts.krea2_filter_bypass_strength, visible=False)
-            no_config(txt2img_filter_bypass_strength)
 
             txt2img_inputs = [
                 dummy_component,
@@ -486,6 +487,8 @@ def create_ui():
 
     with gr.Blocks(analytics_enabled=False, head=canvas_head) as img2img_interface:
         toprow = ui_toprow.Toprow(is_img2img=True)
+        img2img_filter_bypass_strength = gr.Number(value=opts.krea2_filter_bypass_strength, visible=False)
+        no_config(img2img_filter_bypass_strength)
 
         extra_tabs = gr.Tabs(elem_id="img2img_extra_tabs", elem_classes=["extra-networks"])
         extra_tabs.__enter__()
@@ -700,8 +703,6 @@ def create_ui():
                 )
 
             output_panel = create_output_panel("img2img", opts.outdir_img2img_samples, toprow)
-            img2img_filter_bypass_strength = gr.Number(value=opts.krea2_filter_bypass_strength, visible=False)
-            no_config(img2img_filter_bypass_strength)
 
             submit_img2img_inputs = [
                 dummy_component,
