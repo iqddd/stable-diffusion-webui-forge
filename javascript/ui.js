@@ -127,6 +127,15 @@ function create_submit_args(args) {
     return res;
 }
 
+function snapshot_filter_bypass_strength(args) {
+    // The final input is a hidden number included in each generation request.
+    // Capture the applied setting before the request waits in Gradio's queue.
+    if (typeof opts !== "undefined") {
+        args[args.length - 1] = opts.krea2_filter_bypass_strength;
+    }
+    return args;
+}
+
 function setSubmitButtonsVisibility(tabname, showInterrupt, showSkip, showInterrupting) {
     gradioApp().getElementById(tabname + "_interrupt").style.display = showInterrupt ? "block" : "none";
     gradioApp().getElementById(tabname + "_skip").style.display = showSkip ? "block" : "none";
@@ -164,7 +173,7 @@ function submit() {
         },
     );
 
-    const res = create_submit_args(arguments);
+    const res = snapshot_filter_bypass_strength(create_submit_args(arguments));
     res[0] = id;
     return res;
 }
@@ -192,7 +201,7 @@ function submit_img2img() {
         },
     );
 
-    const res = create_submit_args(arguments);
+    const res = snapshot_filter_bypass_strength(create_submit_args(arguments));
     res[0] = id;
     return res;
 }

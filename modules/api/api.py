@@ -435,6 +435,7 @@ class Api:
         return params
 
     def text2imgapi(self, txt2imgreq: models.StableDiffusionTxt2ImgProcessingAPI):
+        filter_bypass_strength = opts.krea2_filter_bypass_strength
         task_id = txt2imgreq.force_task_id or create_task_id("txt2img")
 
         script_runner = scripts.scripts_txt2img
@@ -459,6 +460,8 @@ class Api:
             populate.scheduler = scheduler
 
         args = vars(populate)
+        if args.get("krea2_filter_bypass_strength") is None:
+            args["krea2_filter_bypass_strength"] = filter_bypass_strength
         args.pop("script_name", None)
         args.pop("script_args", None)  # will refeed them to the pipeline directly after initializing them
         args.pop("alwayson_scripts", None)
@@ -498,6 +501,7 @@ class Api:
         return models.TextToImageResponse(images=b64images, parameters=vars(txt2imgreq), info=processed.js())
 
     def img2imgapi(self, img2imgreq: models.StableDiffusionImg2ImgProcessingAPI):
+        filter_bypass_strength = opts.krea2_filter_bypass_strength
         task_id = img2imgreq.force_task_id or create_task_id("img2img")
 
         init_images = img2imgreq.init_images
@@ -531,6 +535,8 @@ class Api:
             populate.scheduler = scheduler
 
         args = vars(populate)
+        if args.get("krea2_filter_bypass_strength") is None:
+            args["krea2_filter_bypass_strength"] = filter_bypass_strength
         args.pop("include_init_images", None)  # this is meant to be done by "exclude": True in model, but it's for a reason that I cannot determine.
         args.pop("script_name", None)
         args.pop("script_args", None)  # will refeed them to the pipeline directly after initializing them

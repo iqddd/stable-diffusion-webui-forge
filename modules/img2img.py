@@ -174,6 +174,7 @@ def process_batch(p, input, output_dir, inpaint_mask_dir, args, to_scale=False, 
 def img2img_function(id_task: str, request: gr.Request, mode: int, prompt: str, negative_prompt: str, prompt_styles, init_img, sketch, sketch_fg, init_img_with_mask, init_img_with_mask_fg, inpaint_color_sketch, inpaint_color_sketch_fg, init_img_inpaint, init_mask_inpaint, mask_blur: int, mask_alpha: float, inpainting_fill: int, n_iter: int, batch_size: int, cfg_scale: float, distilled_cfg_scale: float, image_cfg_scale: float, denoising_strength: float, selected_scale_tab: int, height: int, width: int, scale_by: float, resize_mode: int, inpaint_full_res: bool, inpaint_full_res_padding: int, inpainting_mask_invert: int, img2img_batch_input_dir: str, img2img_batch_output_dir: str, img2img_batch_inpaint_mask_dir: str, override_settings_texts, img2img_batch_use_png_info: bool, img2img_batch_png_info_props: list, img2img_batch_png_info_dir: str, img2img_batch_source_type: str, img2img_batch_upload: list, *args):
 
     override_settings = create_override_settings_dict(override_settings_texts)
+    script_args, krea2_filter_bypass_strength = args[:-1], args[-1]
 
     is_batch = mode == 5
 
@@ -245,10 +246,11 @@ def img2img_function(id_task: str, request: gr.Request, mode: int, prompt: str, 
         inpainting_mask_invert=inpainting_mask_invert,
         override_settings=override_settings,
         distilled_cfg_scale=distilled_cfg_scale,
+        krea2_filter_bypass_strength=krea2_filter_bypass_strength,
     )
 
     p.scripts = modules.scripts.scripts_img2img
-    p.script_args = args
+    p.script_args = script_args
 
     p.user = request.username
 
@@ -262,15 +264,15 @@ def img2img_function(id_task: str, request: gr.Request, mode: int, prompt: str, 
                 output_dir = ""
                 inpaint_mask_dir = ""
                 png_info_dir = img2img_batch_png_info_dir if not shared.cmd_opts.hide_ui_dir_config else ""
-                processed = process_batch(p, img2img_batch_upload, output_dir, inpaint_mask_dir, args, to_scale=selected_scale_tab == 1, scale_by=scale_by, use_png_info=img2img_batch_use_png_info, png_info_props=img2img_batch_png_info_props, png_info_dir=png_info_dir)
+                processed = process_batch(p, img2img_batch_upload, output_dir, inpaint_mask_dir, script_args, to_scale=selected_scale_tab == 1, scale_by=scale_by, use_png_info=img2img_batch_use_png_info, png_info_props=img2img_batch_png_info_props, png_info_dir=png_info_dir)
             else:  # "from dir"
                 assert not shared.cmd_opts.hide_ui_dir_config, "Launched with --hide-ui-dir-config, batch img2img disabled"
-                processed = process_batch(p, img2img_batch_input_dir, img2img_batch_output_dir, img2img_batch_inpaint_mask_dir, args, to_scale=selected_scale_tab == 1, scale_by=scale_by, use_png_info=img2img_batch_use_png_info, png_info_props=img2img_batch_png_info_props, png_info_dir=img2img_batch_png_info_dir)
+                processed = process_batch(p, img2img_batch_input_dir, img2img_batch_output_dir, img2img_batch_inpaint_mask_dir, script_args, to_scale=selected_scale_tab == 1, scale_by=scale_by, use_png_info=img2img_batch_use_png_info, png_info_props=img2img_batch_png_info_props, png_info_dir=img2img_batch_png_info_dir)
 
             if processed is None:
                 processed = Processed(p, [], p.seed, "")
         else:
-            processed = modules.scripts.scripts_img2img.run(p, *args)
+            processed = modules.scripts.scripts_img2img.run(p, *script_args)
             if processed is None:
                 processed = process_images(p)
 

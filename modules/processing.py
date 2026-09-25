@@ -179,6 +179,7 @@ class StableDiffusionProcessing:
     s_tmax: float = None
     s_tmin: float = None
     s_noise: float = None
+    krea2_filter_bypass_strength: float | None = None
     override_settings: dict[str, Any] = None
     override_settings_restore_afterwards: bool = True
     sampler_index: int = None
@@ -256,6 +257,11 @@ class StableDiffusionProcessing:
         self.extra_generation_params = self.extra_generation_params or {}
         self.override_settings = self.override_settings or {}
         self.script_args = self.script_args or {}
+
+        if "krea2_filter_bypass_strength" in self.override_settings:
+            self.krea2_filter_bypass_strength = float(self.override_settings["krea2_filter_bypass_strength"])
+        elif self.krea2_filter_bypass_strength is None:
+            self.krea2_filter_bypass_strength = float(opts.krea2_filter_bypass_strength)
 
         self.refiner_checkpoint_info = None
 
@@ -843,8 +849,8 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
         # backwards compatibility, fix sampler and scheduler if invalid
         sd_samplers.fix_p_invalid_sampler_and_scheduler(p)
 
-        # Snapshot this global setting once per process_images call, outside the compiled model.
-        configure_filter_bypass(p.sd_model, opts.krea2_filter_bypass_strength)
+        # Apply the request's value outside the compiled model.
+        configure_filter_bypass(p.sd_model, p.krea2_filter_bypass_strength)
 
         with profiling.Profiler():
             res = process_images_inner(p)

@@ -1,4 +1,5 @@
 import sys
+from copy import copy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -105,6 +106,26 @@ def test_setting_only_updates_the_loaded_krea_model():
     configure_filter_bypass(first, 0.0)
     assert first_transformer.filter_bypass_strength.item() == 0.0
     assert second_transformer.filter_bypass_strength.item() == 3.0
+
+
+def test_processing_keeps_its_filter_strength_when_global_setting_changes(monkeypatch):
+    from modules import options, shared, shared_options
+
+    monkeypatch.setattr(shared, "options_templates", shared_options.options_templates.copy())
+    monkeypatch.setattr(shared, "opts", options.Options(shared_options.options_templates, shared_options.restricted_opts))
+    from modules.processing import StableDiffusionProcessingTxt2Img
+    from modules.shared import opts
+
+    monkeypatch.setitem(opts.data, "krea2_filter_bypass_strength", 1.25)
+    first = StableDiffusionProcessingTxt2Img()
+    monkeypatch.setitem(opts.data, "krea2_filter_bypass_strength", 2.5)
+    second = StableDiffusionProcessingTxt2Img()
+    overridden = StableDiffusionProcessingTxt2Img(override_settings={"krea2_filter_bypass_strength": 3.0})
+
+    assert first.krea2_filter_bypass_strength == 1.25
+    assert copy(first).krea2_filter_bypass_strength == 1.25
+    assert second.krea2_filter_bypass_strength == 2.5
+    assert overridden.krea2_filter_bypass_strength == 3.0
 
 
 def test_changing_strength_does_not_recompile():

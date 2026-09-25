@@ -17,6 +17,7 @@ from modules_forge import main_thread
 
 def txt2img_create_processing(id_task: str, request: gr.Request, prompt: str, negative_prompt: str, prompt_styles, n_iter: int, batch_size: int, cfg_scale: float, distilled_cfg_scale: float, height: int, width: int, enable_hr: bool, denoising_strength: float, hr_scale: float, hr_upscaler: str, hr_second_pass_steps: int, hr_resize_x: int, hr_resize_y: int, hr_checkpoint_name: str, hr_additional_modules: list, hr_sampler_name: str, hr_scheduler: str, hr_prompt: str, hr_negative_prompt, hr_cfg: float, hr_distilled_cfg: float, override_settings_texts, *args, force_enable_hr=False):
     override_settings = create_override_settings_dict(override_settings_texts)
+    script_args, krea2_filter_bypass_strength = args[:-1], args[-1]
 
     if force_enable_hr:
         enable_hr = True
@@ -49,10 +50,11 @@ def txt2img_create_processing(id_task: str, request: gr.Request, prompt: str, ne
         hr_cfg=hr_cfg,
         hr_distilled_cfg=hr_distilled_cfg,
         override_settings=override_settings,
+        krea2_filter_bypass_strength=krea2_filter_bypass_strength,
     )
 
     p.scripts = modules.scripts.scripts_txt2img
-    p.script_args = args
+    p.script_args = script_args
 
     p.user = request.username
 

@@ -337,6 +337,8 @@ def create_ui():
                 )
 
             output_panel = create_output_panel("txt2img", opts.outdir_txt2img_samples, toprow)
+            txt2img_filter_bypass_strength = gr.Number(value=opts.krea2_filter_bypass_strength, visible=False)
+            no_config(txt2img_filter_bypass_strength)
 
             txt2img_inputs = [
                 dummy_component,
@@ -365,7 +367,9 @@ def create_ui():
                 hr_cfg,
                 hr_distilled_cfg,
                 override_settings,
-            ] + custom_inputs
+                *custom_inputs,
+                txt2img_filter_bypass_strength,
+            ]
 
             txt2img_outputs = [
                 output_panel.gallery,
@@ -696,6 +700,8 @@ def create_ui():
                 )
 
             output_panel = create_output_panel("img2img", opts.outdir_img2img_samples, toprow)
+            img2img_filter_bypass_strength = gr.Number(value=opts.krea2_filter_bypass_strength, visible=False)
+            no_config(img2img_filter_bypass_strength)
 
             submit_img2img_inputs = [
                 dummy_component,
@@ -738,7 +744,9 @@ def create_ui():
                 img2img_batch_png_info_dir,
                 img2img_batch_source_type,
                 img2img_batch_upload,
-            ] + custom_inputs
+                *custom_inputs,
+                img2img_filter_bypass_strength,
+            ]
 
             img2img_args = dict(
                 fn=wrap_gradio_gpu_call(modules.img2img.img2img, extra_outputs=[None, None, "", ""]),
